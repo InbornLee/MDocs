@@ -26,3 +26,6 @@ backend/mcp-check.txt
 Thumbs.db
 .idea/
 *.swp
+
+# ---- browser automation artifacts ----
+.playwright-mcp/
