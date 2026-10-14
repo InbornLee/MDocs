@@ -1,0 +1,28 @@
+# ---- secrets ----
+.env
+.env.*
+*.env
+
+# ---- frontend ----
+frontend/node_modules/
+frontend/dist/
+
+# ---- backend build output / embedded frontend / local data ----
+backend/target/
+backend/crates/app/frontend-dist/
+backend/data/
+backend/data-*
+
+# ---- logs / temp / local tooling ----
+**/*.log
+*.log
+*.tmp
+backend/merge-test.txt
+backend/mcp-check.txt
+**/smoke-*.ps1
+
+# ---- editor / os ----
+.DS_Store
+Thumbs.db
+.idea/
+*.swp

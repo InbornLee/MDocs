@@ -1,0 +1,54 @@
+# MDocs — single-container full-stack deployment.
+#
+#   docker compose up -d --build
+#
+# The whole app (SPA + REST API + MCP endpoint) is served by one process.
+# `/data` is the only stateful mount.
+#
+# The database is an external PostgreSQL instance running on the host, reached
+# at postgresql://mdoc:mdoc@host.docker.internal:5432/mdoc; no database
+# container is declared here. `host.docker.internal` (not 127.0.0.1) is
+# required because the container has its own loopback — under Docker Desktop
+# on Windows/WSL2 the host's loopback is only reachable through that name.
+
+services:
+  mdocs:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        # Package sources default to mainland-China mirrors for fast builds.
+        # Export one of these to change it, or set it to an empty string to use
+        # the upstream source instead.
+        APT_MIRROR: ${APT_MIRROR:-http://mirrors.aliyun.com}
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
+        CARGO_REGISTRY_MIRROR: ${CARGO_REGISTRY_MIRROR:-sparse+https://rsproxy.cn/index/}
+    image: mdocs:latest
+    container_name: mdocs
+    restart: unless-stopped
+    ports:
+      # host port is configurable to avoid clashing with other local services
+      - "${MDOCS_PORT:-8008}:8080"
+    volumes:
+      # Uploaded avatars. For a bind mount instead, use e.g.
+      #   - ./data:/data
+      - mdocs-data:/data
+    environment:
+      # Signs the JWT session tokens. Provide a strong value via the shell
+      # (`docker compose up` picks up .env automatically) or export
+      # APP_JWT__SECRET before starting. Changing it invalidates sessions.
+      APP_JWT__SECRET: ${APP_JWT__SECRET:-please-change-me-to-a-long-random-string}
+      # External PostgreSQL on the host (see the note at the top).
+      APP_DATABASE__URL: "postgresql://mdoc:mdoc@host.docker.internal:5432/mdoc"
+      # Extra Host authorities accepted by the /mcp endpoint (comma separated).
+      APP_MCP__ALLOWED_HOSTS: "localhost,127.0.0.1"
+      RUST_LOG: "info"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  mdocs-data:

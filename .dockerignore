@@ -1,0 +1,30 @@
+# Keep the build context small and reproducible.
+# The SPA is rebuilt inside the image, and Rust artifacts are never reused
+# from the host (different toolchain/target).
+
+.git
+.gitignore
+**/.git
+
+# deployment secrets are injected at run time, never baked into the image
+.env
+.env.*
+*.env
+
+# frontend
+frontend/node_modules
+frontend/dist
+
+# backend build output / local databases
+backend/target
+backend/data
+backend/data-*
+backend/crates/app/frontend-dist
+
+# local tooling noise
+**/*.log
+*.log
+*.tmp
+**/smoke-*.ps1
+backend/merge-test.txt
+backend/mcp-check.txt

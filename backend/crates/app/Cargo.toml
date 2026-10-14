@@ -1,0 +1,59 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "mdocs"
+path = "src/main.rs"
+
+[dependencies]
+migration = { path = "../migration" }
+
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+axum = { version = "0.8", features = ["multipart", "macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+
+sea-orm = { version = "1.1.20", features = [
+    "sqlx-sqlite",
+    "sqlx-postgres",
+    "runtime-tokio-rustls",
+    "macros",
+    "with-chrono",
+    "with-uuid",
+] }
+
+rmcp = { version = "3.2.0", features = [
+    "server",
+    "macros",
+    "schemars",
+    "transport-streamable-http-server",
+] }
+schemars = "1"
+
+comrak = { version = "0.55", default-features = false, features = ["shortcodes"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
+# ZIP entry names are only UTF-8 when the archive sets the UTF-8 flag; Chinese
+# Windows archivers write GBK instead, so the raw name bytes have to be decoded
+# again on import.
+encoding_rs = "0.8"
+
+jsonwebtoken = { version = "11", features = ["rust_crypto"] }
+argon2 = "0.6"
+rust-embed = { version = "8", features = ["compression"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+mime_guess = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+regex = "1"
+sha2 = "0.10"
+percent-encoding = "2"
+rand = "0.9"
