@@ -32,3 +32,6 @@ Thumbs.db
 
 # ---- deployment artifacts stay local, never pushed to the remote ----
 deploy/
+
+# ---- local test docs / samples (not part of the repository) ----
+doc-test/
