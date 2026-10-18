@@ -4,7 +4,9 @@
 
 use chrono::Utc;
 use rand::RngCore;
-use sea_orm::{ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set,
+};
 use uuid::Uuid;
 
 use crate::entities::api_token;
@@ -24,7 +26,10 @@ fn hash(token: &str) -> String {
 
 /// 供页面 / 审计辨认的 token 前缀（与 `create` 写入的 `token_prefix` 一致）。
 pub fn display_prefix(token: &str) -> String {
-    let body = token.trim().strip_prefix(TOKEN_PREFIX).unwrap_or(token.trim());
+    let body = token
+        .trim()
+        .strip_prefix(TOKEN_PREFIX)
+        .unwrap_or(token.trim());
     format!(
         "{TOKEN_PREFIX}{}",
         body.chars().take(DISPLAY_CHARS).collect::<String>()

@@ -1,6 +1,7 @@
 import MarkdownIt from 'markdown-it'
 import type { MarkdownIt as MarkdownItInstance } from 'markdown-it'
 import hljs from 'highlight.js/lib/common'
+import { getToken } from '@/api/client'
 
 function escapeHtml(s: string): string {
   return s
@@ -268,7 +269,11 @@ function assetPlugin(md: MarkdownItInstance, getCtx?: () => MarkdownAssetContext
       const rel = resolveAssetPath(ctx.docPath ?? '', String(token.attrs[i][1]))
       if (rel) {
         const encoded = rel.split('/').map(encodeURIComponent).join('/')
-        token.attrs[i][1] = `/uploads/attachments/${ctx.projectId}/${encoded}`
+        // 私有项目的图片无法通过 <img> 带 Authorization 头，用查询参数携带会话 token
+        const session = getToken()
+        token.attrs[i][1] =
+          `/uploads/attachments/${ctx.projectId}/${encoded}` +
+          (session ? `?token=${encodeURIComponent(session)}` : '')
       }
     }
     return base

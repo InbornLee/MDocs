@@ -1,4 +1,8 @@
-use axum::{extract::State, routing::{get, post}, Extension, Json, Router};
+use axum::{
+    extract::State,
+    routing::{get, post},
+    Extension, Json, Router,
+};
 use chrono::Utc;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
@@ -80,7 +84,9 @@ async fn register(
     validate_username(&req.username)?;
     validate_email(&req.email)?;
     if req.password.len() < 8 {
-        return Err(AppError::BadRequest("password must be at least 8 chars".into()));
+        return Err(AppError::BadRequest(
+            "password must be at least 8 chars".into(),
+        ));
     }
 
     let exists = user::Entity::find()
@@ -99,8 +105,7 @@ async fn register(
     let model = user::ActiveModel {
         id: Set(Uuid::now_v7()),
         username: Set(req.username),
-        email: Set(req.email,
-        ),
+        email: Set(req.email),
         password_hash: Set(auth::hash_password(&req.password)?),
         display_name: Set(String::new()),
         avatar_file: Set(None),
@@ -111,7 +116,9 @@ async fn register(
     };
     let created = model.insert(&state.db).await?;
     let token = auth::create_token(&state.cfg.jwt_secret, created.id)?;
-    Ok(Json(serde_json::json!({ "token": token, "user": UserDto::from(created) })))
+    Ok(Json(
+        serde_json::json!({ "token": token, "user": UserDto::from(created) }),
+    ))
 }
 
 async fn login(
@@ -135,7 +142,9 @@ async fn login(
         return Err(AppError::Forbidden("account disabled".into()));
     }
     let token = auth::create_token(&state.cfg.jwt_secret, u.id)?;
-    Ok(Json(serde_json::json!({ "token": token, "user": UserDto::from(u) })))
+    Ok(Json(
+        serde_json::json!({ "token": token, "user": UserDto::from(u) }),
+    ))
 }
 
 pub fn public_routes() -> Router<AppState> {

@@ -9,11 +9,7 @@ mod static_files;
 
 use std::sync::Arc;
 
-use axum::{
-    extract::State,
-    routing::get,
-    Json, Router,
-};
+use axum::{extract::State, routing::get, Json, Router};
 use migration::MigratorTrait;
 use sea_orm::{ConnectionTrait, Database};
 use tower_http::{
@@ -41,10 +37,14 @@ async fn version(State(state): State<AppState>) -> Json<serde_json::Value> {
                 "list_projects",
                 "list_branches",
                 "list_documents",
+                "list_tags",
                 "get_document_outline",
                 "read_document",
                 "search_documents",
-                "get_link_graph"
+                "get_link_graph",
+                "get_history",
+                "get_diff",
+                "list_attachments"
             ],
             "resources": true,
             "prompts": ["answer_with_citations"],
@@ -119,6 +119,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // SQLite: enable foreign keys pragma (no-op on postgres)
     if cfg.database_url.starts_with("sqlite") {
         db.execute_unprepared("PRAGMA foreign_keys = ON;").await?;
+        // 后台回填索引与前台保存可能并发写，给 SQLite 留出等待时间
+        db.execute_unprepared("PRAGMA busy_timeout = 5000;").await?;
     }
 
     tracing::info!("running migrations");
@@ -133,6 +135,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         db,
         cfg: Arc::new(cfg),
     };
+
+    // P1：为历史版本异步建立 chunk 索引；不阻塞服务启动
+    {
+        let db = state.db.clone();
+        tokio::spawn(async move {
+            services::index::backfill(db).await;
+        });
+    }
+    // P1 阶段 2：配置了 embedding 服务时后台补齐向量；未配置则纯 BM25
+    {
+        let st = state.clone();
+        tokio::spawn(async move {
+            services::embedding::run_worker(st).await;
+        });
+    }
     let listen = state.cfg.listen.clone();
     let app = build_router(state);
 

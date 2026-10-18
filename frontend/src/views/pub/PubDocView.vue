@@ -311,7 +311,15 @@ const onBodyClick = useDocLinks({
       <div ref="scrollEl" class="doc-body">
         <n-spin :show="loading">
           <p v-if="!doc && !loading" class="empty-state">文档不存在或未发布</p>
-          <div v-else ref="bodyEl" class="markdown-body" v-html="html" @click="onBodyClick"></div>
+          <template v-else-if="doc">
+            <div v-if="doc.description || doc.tags?.length" class="doc-meta">
+              <p v-if="doc.description" class="doc-desc">{{ doc.description }}</p>
+              <div v-if="doc.tags?.length" class="doc-tags">
+                <n-tag v-for="t in doc.tags" :key="t" size="small" round :bordered="false">{{ t }}</n-tag>
+              </div>
+            </div>
+            <div ref="bodyEl" class="markdown-body" v-html="html" @click="onBodyClick"></div>
+          </template>
         </n-spin>
       </div>
     </main>
@@ -349,5 +357,19 @@ const onBodyClick = useDocLinks({
   min-height: 0;
   overflow: auto;
   padding-top: 22px;
+}
+.doc-meta {
+  margin: 0 0 18px;
+}
+.doc-desc {
+  margin: 0 0 8px;
+  color: var(--ink-2);
+  font-size: 13.5px;
+  line-height: 1.7;
+}
+.doc-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 </style>

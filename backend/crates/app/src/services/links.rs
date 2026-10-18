@@ -72,12 +72,8 @@ pub fn extract_links(content: &str) -> Vec<RawLink> {
     for node in root.descendants() {
         let data = node.data.borrow();
         let (raw_url, link_type, display) = match &data.value {
-            comrak::nodes::NodeValue::Link(l) => {
-                (l.url.clone(), "md_relative", first_text(node))
-            }
-            comrak::nodes::NodeValue::WikiLink(w) => {
-                (w.url.clone(), "wiki", first_text(node))
-            }
+            comrak::nodes::NodeValue::Link(l) => (l.url.clone(), "md_relative", first_text(node)),
+            comrak::nodes::NodeValue::WikiLink(w) => (w.url.clone(), "wiki", first_text(node)),
             _ => continue,
         };
         drop(data);
@@ -116,7 +112,7 @@ pub struct PathResolver {
 }
 
 /// Normalize a `/`-joined relative path (resolve `.` and `..` segments).
-fn clean_path(dir: &str, rel: &str) -> Option<String> {
+pub(crate) fn clean_path(dir: &str, rel: &str) -> Option<String> {
     let rel = rel.trim().trim_start_matches("./");
     let joined: Vec<&str> = if rel.starts_with('/') || dir.is_empty() {
         // absolute target, or already at the root: use it as-is
@@ -248,9 +244,7 @@ pub async fn after_commit(
             path_by_id.insert(d.id, d.path);
         }
     }
-    let resolver = PathResolver::new(
-        path_by_id.iter().map(|(id, p)| (p.clone(), *id)),
-    );
+    let resolver = PathResolver::new(path_by_id.iter().map(|(id, p)| (p.clone(), *id)));
 
     // 1) rebuild outgoing edges of updated docs (drop them for deletions)
     for u in updates {

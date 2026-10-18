@@ -65,13 +65,23 @@ fn diff_chunks(base: &[String], other: &[String], pairs: &[(usize, usize)]) -> V
     let (mut bp, mut op) = (0usize, 0usize);
     for &(bi, oi) in pairs {
         if bi > bp || oi > op {
-            chunks.push(Chunk { b_lo: bp, b_hi: bi, o_lo: op, o_hi: oi });
+            chunks.push(Chunk {
+                b_lo: bp,
+                b_hi: bi,
+                o_lo: op,
+                o_hi: oi,
+            });
         }
         bp = bi + 1;
         op = oi + 1;
     }
     if bp < base.len() || op < other.len() {
-        chunks.push(Chunk { b_lo: bp, b_hi: base.len(), o_lo: op, o_hi: other.len() });
+        chunks.push(Chunk {
+            b_lo: bp,
+            b_hi: base.len(),
+            o_lo: op,
+            o_hi: other.len(),
+        });
     }
     chunks
 }
@@ -151,7 +161,11 @@ pub fn diff3(base: &[String], ours: &[String], theirs: &[String]) -> Vec<Region>
 
         // transitive overlap closure
         let (mut a_used, mut b_used) = (0usize, 0usize);
-        if seed_from_ours { a_used = 1 } else { b_used = 1 }
+        if seed_from_ours {
+            a_used = 1
+        } else {
+            b_used = 1
+        }
         loop {
             let mut grew = false;
             while ai + a_used < ca.len()
@@ -254,20 +268,32 @@ pub fn render_regions(regions: &[Region]) -> MergeOutcome {
             }
         }
     }
-    MergeOutcome { content: buf, has_conflict }
+    MergeOutcome {
+        content: buf,
+        has_conflict,
+    }
 }
 
 /// Three-way merge of one file. `ours` is the target-branch side,
 /// `theirs` is the source-branch side.
 pub fn merge_file(base: &str, ours: &str, theirs: &str) -> MergeOutcome {
     if ours == theirs {
-        return MergeOutcome { content: ours.to_string(), has_conflict: false };
+        return MergeOutcome {
+            content: ours.to_string(),
+            has_conflict: false,
+        };
     }
     if ours == base {
-        return MergeOutcome { content: theirs.to_string(), has_conflict: false };
+        return MergeOutcome {
+            content: theirs.to_string(),
+            has_conflict: false,
+        };
     }
     if theirs == base {
-        return MergeOutcome { content: ours.to_string(), has_conflict: false };
+        return MergeOutcome {
+            content: ours.to_string(),
+            has_conflict: false,
+        };
     }
     let b = split_lines(base);
     let o = split_lines(ours);

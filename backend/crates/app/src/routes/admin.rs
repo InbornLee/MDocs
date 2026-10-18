@@ -342,7 +342,9 @@ async fn unpublish_project(
         am.updated_at = Set(Utc::now());
         am.update(&state.db).await?;
     }
-    Ok(Json(serde_json::json!({ "slug": slug, "visibility": "private" })))
+    Ok(Json(
+        serde_json::json!({ "slug": slug, "visibility": "private" }),
+    ))
 }
 
 // ---------- 站点设置 ----------
@@ -389,7 +391,12 @@ async fn update_site(
 }
 
 /// 选填链接：留空清掉，否则必须是 http(s)
-async fn set_optional_url(state: &AppState, key: &str, value: Option<&str>, field: &str) -> AppResult<()> {
+async fn set_optional_url(
+    state: &AppState,
+    key: &str,
+    value: Option<&str>,
+    field: &str,
+) -> AppResult<()> {
     let Some(raw) = value.map(str::trim) else {
         return Ok(());
     };

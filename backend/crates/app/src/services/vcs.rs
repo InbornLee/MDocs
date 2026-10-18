@@ -156,7 +156,9 @@ fn pick_nearest(
     depth_of: &HashMap<Uuid, usize>,
     created_at: &HashMap<Uuid, DateTime<Utc>>,
 ) {
-    let Some(d) = depth_of.get(&cd.commit_id) else { return };
+    let Some(d) = depth_of.get(&cd.commit_id) else {
+        return;
+    };
     if best.as_ref().is_some_and(|(_, bd)| *bd <= *d) {
         return;
     }
@@ -216,14 +218,20 @@ pub async fn branch_doc_states(
         .await?;
     let mut best: HashMap<Uuid, (DocState, usize)> = HashMap::new();
     for cd in cds {
-        let Some(d) = depth_of.get(&cd.commit_id).copied() else { continue };
+        let Some(d) = depth_of.get(&cd.commit_id).copied() else {
+            continue;
+        };
         if best.get(&cd.document_id).is_none_or(|(_, bd)| *bd > d) {
             let st = DocState {
                 document_id: cd.document_id,
                 version_id: cd.version_id,
                 commit_id: cd.commit_id,
                 change_type: cd.change_type.clone(),
-                updated_at: graph.created_at.get(&cd.commit_id).cloned().unwrap_or_default(),
+                updated_at: graph
+                    .created_at
+                    .get(&cd.commit_id)
+                    .cloned()
+                    .unwrap_or_default(),
             };
             best.insert(cd.document_id, (st, d));
         }
@@ -335,5 +343,8 @@ pub async fn create_version(
         created_by: Set(created_by),
         created_at: Set(Utc::now()),
     };
-    m.insert(db).await
+    // 与版本写入同事务建立检索索引，保证保存后立即可搜
+    let m = m.insert(db).await?;
+    crate::services::index::index_version(db, &m).await?;
+    Ok(m)
 }

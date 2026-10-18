@@ -46,6 +46,8 @@ export interface DocContent {
   commit_id: string
   size_bytes: number
   updated_at: string
+  tags: string[]
+  description: string | null
 }
 
 export interface SaveResult {

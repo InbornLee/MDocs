@@ -77,13 +77,44 @@ MDocs 已经是一个**可直接接入 AI 客户端的文档知识库**：MCP St
 
 ### 0.1.2 — P1（下一步）
 
-- 倒排索引：SQLite FTS5（trigram，中文友好）/ PostgreSQL `tsvector + pg_trgm`，增量维护在 commit 钩子
-- Chunk 级索引与检索（按 heading 切块，保留代码块/表格）
-- 混合检索：BM25 + 向量，RRF 融合
-- 元数据：front matter 的 tags / description 入索引，`list_tags` 与按 tag 过滤
-- 版本感知：`read_document(version=...)`、`get_history`、`get_diff`
-- 附件：MCP 返回引用附件清单与可访问 URL，图片可做 OCR/描述
-- 鉴权：OAuth 2.1 / 动态客户端注册，token scope
+P1 分四个阶段推进：
+
+- **阶段 1（已完成，0.1.1）**：chunk 级倒排索引 + BM25 + MCP 检索切换
+  - 自实现 bigram/词级分词，SQLite / PostgreSQL 通用，不依赖 FTS5 / pg_trgm
+  - 按 heading 切块（保留代码块/表格），chunk 带 anchor / 行号
+  - `doc_chunks` + `chunk_terms` + `search_index_state`，创建版本时同事务增量索引
+  - 启动异步回填历史版本；搜索时对未索引版本懒索引
+  - 线上验证：416 个历史版本回填约 15s，3293 chunks / 321k terms；
+    MCP 搜索 17–87ms，两字中文词（「住院」「护理」）与长词（「人民医院」）均能命中，
+    返回 `section` / `anchor` / 行号；旧内容在更新后不再命中
+  - 已知限制：REST 搜索仍走原内存实现（后续统一）；`count` 是本次候选数而非全库总数；
+    旧版本的索引暂不回收（GC 待做）；标题高度重复时排序会偏向标题块
+- **阶段 2（已完成，0.1.1）**：混合检索（向量 + RRF 融合）
+  - 可选 OpenAI 兼容 embedding（Ollama / vLLM / 云端），未配置时自动降级纯 BM25
+  - `chunk_vectors` 存 f32 BLOB，应用层余弦计算；不依赖 sqlite-vec / pgvector
+  - 后台 worker 每 30s 补齐缺失向量，支持模型变更后重建
+  - 检索：BM25 top50 + 向量 top50，RRF（k=60）融合；embedding 失败自动回退
+  - 配置：`APP_EMBEDDING__URL`、`APP_EMBEDDING__MODEL`（默认 bge-m3）、
+    `APP_EMBEDDING__API_KEY`、`APP_EMBEDDING__BATCH_SIZE`、`APP_EMBEDDING__TIMEOUT_SECS`
+  - 已知限制：向量在应用层暴力扫描，适合几千~几万 chunk；更大规模需要 ANN（pgvector / sqlite-vec）；
+    新文档向量最多延迟约 30s；REST 搜索仍未切换
+- **阶段 3（已完成，0.1.1）**：元数据（front matter 的 tags / description）
+  - `doc_meta` + `doc_tags`，创建版本时同步解析；回填补齐历史版本
+  - MCP `list_tags` 工具；`search_documents` 支持 `tag` 参数与 `tag:xxx` 查询语法
+  - `list_documents` / `read_document` 返回 `tags` 与 `description`
+  - REST：`/api/projects/{slug}/tags`、`/api/public/projects/{slug}/tags`；
+    文档内容接口返回 tags/description
+  - 前端阅读页（工作台 + 公开站点）展示描述与标签
+  - front matter 不再进入全文索引，减少标题/标签对正文排序的污染
+  - 已知限制：只解析 front matter，不支持行内 `#tag`；前端暂未做按标签筛选文档树
+- **阶段 4（已完成，0.1.1；OAuth 除外）**：版本感知与附件
+  - `read_document(version_id=...)`（返回 `is_current`）
+  - `get_history`（commit、作者、版本 id、当前标记）
+  - `get_diff`（默认 head vs 上一版本，也可指定两端）
+  - `list_attachments`：文档引用的附件（路径 / URL / MIME / 大小）+ 缺失引用；
+    `all=true` 列项目全部附件（要求项目成员）
+  - 已知限制：OAuth 2.1 / token scope 尚未实现，仍是静态 Bearer token；
+    附件下载路由仍是无鉴权路径，后续可换签名 URL
 
 ### 0.1.3 — P2
 
@@ -166,3 +197,13 @@ chunk 表（跨后端统一）:
   直连部署也能记录真实来源。
 - 全局启用 gzip 压缩（`tower-http::CompressionLayer`）；SSE（`text/event-stream`）
   由默认谓词自动排除，不影响 MCP 流式响应。
+
+### 0.1.1 补丁二：resources 审计与限流响应头
+
+- `list_resources` / `read_resource` 接入统一的 `ToolAudit`：
+  - 失败写入 `ok=false` + 错误消息（以前只记成功）
+  - `read_resource` 从 `mdocs://{project}/{path}` 解析出 `project`，便于按项目筛选
+- 限流响应头：
+  - 所有 `/mcp` 响应带 `RateLimit-Limit`、`RateLimit-Remaining`、`RateLimit-Reset`
+  - 429 额外带 `Retry-After`，JSON 体包含 `retry_after_seconds`
+- 验证：本地与线上均确认 `resources/read` 失败记录为 `ok=f`，且 `project` 正确。

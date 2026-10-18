@@ -91,7 +91,14 @@ struct Hunk {
     lines: Vec<(char, String)>,
 }
 
-fn render_hunk(ops: &[Op], a: &[&str], b: &[&str], positions: &[(usize, usize)], start: usize, end: usize) -> Hunk {
+fn render_hunk(
+    ops: &[Op],
+    a: &[&str],
+    b: &[&str],
+    positions: &[(usize, usize)],
+    start: usize,
+    end: usize,
+) -> Hunk {
     let (a_start, b_start) = positions[start];
     let mut lines = Vec::new();
     let mut a_len = 0usize;
@@ -113,7 +120,13 @@ fn render_hunk(ops: &[Op], a: &[&str], b: &[&str], positions: &[(usize, usize)],
             }
         }
     }
-    Hunk { a_start, b_start, a_len, b_len, lines }
+    Hunk {
+        a_start,
+        b_start,
+        a_len,
+        b_len,
+        lines,
+    }
 }
 
 /// Unified diff of two texts with `context` unchanged lines around changes.
@@ -209,7 +222,10 @@ mod tests {
     fn added_trailing_line() {
         let d = unified("a\n", "a\nb\n", 3);
         assert!(d.contains("+b"), "{d}");
-        assert!(!d.lines().any(|l| l.starts_with('-')), "no deletion lines expected: {d}");
+        assert!(
+            !d.lines().any(|l| l.starts_with('-')),
+            "no deletion lines expected: {d}"
+        );
     }
 
     #[test]

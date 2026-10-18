@@ -20,7 +20,7 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::entities::{document, doc_version};
+use crate::entities::{doc_version, document, project};
 use crate::error::{AppError, AppResult};
 use crate::services::{
     attachment, auth::CurrentUser, links, links::LinkUpdate, merge, perm, perm::Role, vcs,
@@ -47,15 +47,75 @@ pub fn routes() -> Router<AppState> {
 /// has to render them too. The project id in the URL is a UUID, so the path is
 /// not guessable.
 pub fn public_routes() -> Router<AppState> {
-    Router::new().route("/uploads/attachments/{project_id}/{*path}", get(get_attachment))
+    Router::new().route(
+        "/uploads/attachments/{project_id}/{*path}",
+        get(get_attachment),
+    )
+}
+
+#[derive(Deserialize)]
+struct AttachmentAuthQuery {
+    /// 私有项目的图片可以在 URL 上带会话 token（浏览器 `<img>` 无法加 header）。
+    token: Option<String>,
+}
+
+/// 公开项目直接放行；私有项目要求 JWT 或 API token 且为项目成员。
+async fn attachment_allowed(
+    state: &AppState,
+    proj: &project::Model,
+    headers: &HeaderMap,
+    query_token: Option<&str>,
+) -> AppResult<bool> {
+    if proj.visibility == "public" {
+        return Ok(true);
+    }
+    let header_token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            v.strip_prefix("Bearer ")
+                .or_else(|| v.strip_prefix("bearer "))
+        });
+    let Some(token) = header_token
+        .or(query_token)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(false);
+    };
+
+    if let Ok(claims) = crate::services::auth::verify_token(&state.cfg.jwt_secret, token) {
+        if let Ok(uid) = Uuid::parse_str(&claims.sub) {
+            let u = crate::services::auth::load_user(&state.db, uid).await?;
+            if u.enabled {
+                return Ok(perm::project_role(&state.db, proj, uid).await? >= Role::Reader);
+            }
+        }
+    }
+    if let Ok(Some(uid)) = crate::services::api_token::resolve(&state.db, token).await {
+        let u = crate::services::auth::load_user(&state.db, uid).await?;
+        if u.enabled {
+            return Ok(perm::project_role(&state.db, proj, uid).await? >= Role::Reader);
+        }
+    }
+    Ok(false)
 }
 
 async fn get_attachment(
     State(state): State<AppState>,
     Path((project_id, path)): Path<(String, String)>,
+    Query(auth_q): Query<AttachmentAuthQuery>,
+    headers: HeaderMap,
 ) -> AppResult<Response> {
     let project_id = Uuid::parse_str(&project_id)
         .map_err(|_| AppError::NotFound("attachment not found".into()))?;
+    let proj = project::Entity::find_by_id(project_id)
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| AppError::NotFound("attachment not found".into()))?;
+    if !attachment_allowed(&state, &proj, &headers, auth_q.token.as_deref()).await? {
+        return Err(AppError::NotFound("attachment not found".into()));
+    }
     let bytes = attachment::read(&state, project_id, &path).await?;
     let mime = mime_guess::from_path(&path).first_or_octet_stream();
     let mut headers = HeaderMap::new();
@@ -66,7 +126,11 @@ async fn get_attachment(
     );
     headers.insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=3600"),
+        HeaderValue::from_static(if proj.visibility == "public" {
+            "public, max-age=3600"
+        } else {
+            "private, max-age=300"
+        }),
     );
     Ok((StatusCode::OK, headers, Body::from(bytes)).into_response_ext())
 }
@@ -392,17 +456,19 @@ async fn apply_import_as(
                 am.updated_at = Set(now);
                 am.update(&txn).await?
             }
-            None => document::ActiveModel {
-                id: Set(Uuid::now_v7()),
-                project_id: Set(proj.id),
-                path: Set(path.clone()),
-                title: Set(vcs::extract_title(content, path)),
-                published: Set(true),
-                created_at: Set(now),
-                updated_at: Set(now),
+            None => {
+                document::ActiveModel {
+                    id: Set(Uuid::now_v7()),
+                    project_id: Set(proj.id),
+                    path: Set(path.clone()),
+                    title: Set(vcs::extract_title(content, path)),
+                    published: Set(true),
+                    created_at: Set(now),
+                    updated_at: Set(now),
+                }
+                .insert(&txn)
+                .await?
             }
-            .insert(&txn)
-            .await?,
         };
         let ver = vcs::create_version(&txn, doc.id, content, cur.id).await?;
         changes.push(vcs::Change {
@@ -459,14 +525,7 @@ async fn apply_import_as(
     )
     .await?;
 
-    links::after_commit(
-        &txn,
-        proj.id,
-        br.id,
-        Some(commit.id),
-        &link_updates,
-    )
-    .await?;
+    links::after_commit(&txn, proj.id, br.id, Some(commit.id), &link_updates).await?;
     txn.commit().await?;
 
     Ok(ImportResultDto {
@@ -510,10 +569,7 @@ async fn import_upload(
             "message" => message = Some(field.text().await.unwrap_or_default()),
             "paths" => paths_json = Some(field.text().await.unwrap_or_default()),
             _ => {
-                let filename = field
-                    .file_name()
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
+                let filename = field.file_name().map(|s| s.to_string()).unwrap_or_default();
                 // `Field::chunk()` returns only the *next* fragment of the field
                 // body, so using it here silently truncates anything larger than
                 // one chunk (which made bigger ZIPs fail with "Could not find
@@ -642,7 +698,10 @@ fn expand_zip(
             docs.push(ImportItem { path: raw, content });
         } else {
             // images (and anything else) become attachments, keeping their path
-            assets.push(AssetItem { path: raw, bytes: buf });
+            assets.push(AssetItem {
+                path: raw,
+                bytes: buf,
+            });
         }
     }
     Ok(())
@@ -675,7 +734,9 @@ async fn import_tree(
         return Err(AppError::BadRequest("tree contains no documents".into()));
     }
     if req.docs.len() > 5000 {
-        return Err(AppError::BadRequest("tree too large (max 5000 docs)".into()));
+        return Err(AppError::BadRequest(
+            "tree too large (max 5000 docs)".into(),
+        ));
     }
     let items = req
         .docs
@@ -757,11 +818,7 @@ async fn collect_alive(
     Ok(out)
 }
 
-fn download_response(
-    bytes: Vec<u8>,
-    content_type: &str,
-    filename: &str,
-) -> AppResult<Response> {
+fn download_response(bytes: Vec<u8>, content_type: &str, filename: &str) -> AppResult<Response> {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
@@ -771,18 +828,20 @@ fn download_response(
     // RFC 5987: ascii fallback + UTF-8 encoded filename
     let ascii: String = filename
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || " ._-()".contains(c) { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || " ._-()".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    let utf8 = percent_encoding::utf8_percent_encode(
-        filename,
-        percent_encoding::NON_ALPHANUMERIC,
-    )
-    .to_string();
+    let utf8 = percent_encoding::utf8_percent_encode(filename, percent_encoding::NON_ALPHANUMERIC)
+        .to_string();
     let cd = format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{utf8}");
     headers.insert(
         header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(&cd)
-            .map_err(|_| AppError::Internal("bad disposition".into()))?,
+        HeaderValue::from_str(&cd).map_err(|_| AppError::Internal("bad disposition".into()))?,
     );
     Ok((StatusCode::OK, headers, Body::from(bytes)).into_response_ext())
 }
@@ -919,7 +978,11 @@ async fn export_tree(
         exported_at: Utc::now(),
         docs: docs
             .into_iter()
-            .map(|(path, content, title)| TreeExportDoc { path, title, content })
+            .map(|(path, content, title)| TreeExportDoc {
+                path,
+                title,
+                content,
+            })
             .collect(),
     };
     let bytes = serde_json::to_vec_pretty(&dto)

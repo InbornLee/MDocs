@@ -7,13 +7,12 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set,
-    TransactionTrait,
+    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::entities::{commit, commit_doc, document, doc_version, link_edge, user};
+use crate::entities::{commit, commit_doc, doc_version, document, link_edge, user};
 use crate::error::{AppError, AppResult};
 use crate::services::{
     auth::CurrentUser, diff, links, links::LinkUpdate, perm, perm::Role, search, vcs,
@@ -22,21 +21,31 @@ use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route("/api/projects/{slug}/docs", get(list_docs).post(create_doc))
         .route(
-            "/api/projects/{slug}/docs",
-            get(list_docs).post(create_doc),
+            "/api/projects/{slug}/docs/{doc_id}/content",
+            get(get_doc_content),
         )
-        .route("/api/projects/{slug}/docs/{doc_id}/content", get(get_doc_content))
+        .route("/api/projects/{slug}/tags", get(list_tags))
         .route(
             "/api/projects/{slug}/docs/{doc_id}",
             axum::routing::put(save_doc)
                 .patch(move_doc)
                 .delete(delete_doc),
         )
-        .route("/api/projects/{slug}/docs/{doc_id}/history", get(doc_history))
+        .route(
+            "/api/projects/{slug}/docs/{doc_id}/history",
+            get(doc_history),
+        )
         .route("/api/projects/{slug}/docs/{doc_id}/diff", get(doc_diff))
-        .route("/api/projects/{slug}/docs/{doc_id}/revert", axum::routing::post(revert_doc))
-        .route("/api/projects/{slug}/docs/{doc_id}/publish", axum::routing::patch(set_published))
+        .route(
+            "/api/projects/{slug}/docs/{doc_id}/revert",
+            axum::routing::post(revert_doc),
+        )
+        .route(
+            "/api/projects/{slug}/docs/{doc_id}/publish",
+            axum::routing::patch(set_published),
+        )
         .route("/api/projects/{slug}/search", get(search_docs))
         .route("/api/projects/{slug}/links", get(get_links))
 }
@@ -123,17 +132,20 @@ async fn list_docs(
 
     let mut items: Vec<DocListItem> = Vec::with_capacity(alive.len());
     for (doc_id, version_id) in alive {
-        let Some(d) = by_id.get(&doc_id) else { continue };
+        let Some(d) = by_id.get(&doc_id) else {
+            continue;
+        };
         items.push(DocListItem {
             id: d.id,
             path: d.path.clone(),
             title: d.title.clone(),
             published: d.published,
             version_id,
-            updated_at: states.get(&doc_id).map(|s| s.updated_at).unwrap_or(d.updated_at),
-            size_bytes: version_id
-                .and_then(|v| sizes.get(&v).copied())
-                .unwrap_or(0) as i64,
+            updated_at: states
+                .get(&doc_id)
+                .map(|s| s.updated_at)
+                .unwrap_or(d.updated_at),
+            size_bytes: version_id.and_then(|v| sizes.get(&v).copied()).unwrap_or(0) as i64,
         });
     }
     items.sort_by(|a, b| a.path.cmp(&b.path));
@@ -189,17 +201,19 @@ async fn create_doc(
             am.updated_at = Set(now);
             am.update(&txn).await?
         }
-        None => document::ActiveModel {
-            id: Set(Uuid::now_v7()),
-            project_id: Set(proj.id),
-            path: Set(path.clone()),
-            title: Set(title.clone()),
-            published: Set(true),
-            created_at: Set(now),
-            updated_at: Set(now),
+        None => {
+            document::ActiveModel {
+                id: Set(Uuid::now_v7()),
+                project_id: Set(proj.id),
+                path: Set(path.clone()),
+                title: Set(title.clone()),
+                published: Set(true),
+                created_at: Set(now),
+                updated_at: Set(now),
+            }
+            .insert(&txn)
+            .await?
         }
-        .insert(&txn)
-        .await?,
     };
 
     let ver = vcs::create_version(&txn, doc.id, &req.content, cur.id).await?;
@@ -209,8 +223,7 @@ async fn create_doc(
         br.id,
         br.head_commit_id,
         cur.id,
-        &req
-            .message
+        &req.message
             .clone()
             .unwrap_or_else(|| format!("create {path}")),
         "edit",
@@ -310,6 +323,33 @@ struct DocContentDto {
     commit_id: Uuid,
     size_bytes: i32,
     updated_at: DateTime<Utc>,
+    tags: Vec<String>,
+    description: Option<String>,
+}
+
+async fn list_tags(
+    State(state): State<AppState>,
+    Extension(cur): Extension<CurrentUser>,
+    Path(slug): Path<String>,
+    Query(q): Query<BranchQuery>,
+) -> AppResult<Json<serde_json::Value>> {
+    let proj = perm::get_project(&state.db, &slug).await?;
+    perm::require_role(&state.db, &proj, cur.id, Role::Public).await?;
+    let br = vcs::resolve_branch(&state.db, &proj, q.branch.as_deref()).await?;
+    let graph = vcs::CommitGraph::load(&state.db, proj.id).await?;
+    let states = vcs::branch_doc_states(&state.db, &graph, br.head_commit_id).await?;
+    let version_ids: Vec<Uuid> = states
+        .values()
+        .filter(|s| s.change_type != "deleted")
+        .filter_map(|s| s.version_id)
+        .collect();
+    let tags = crate::services::metadata::tag_counts(&state.db, &version_ids).await?;
+    Ok(Json(serde_json::json!({
+        "tags": tags
+            .into_iter()
+            .map(|(tag, count)| serde_json::json!({ "tag": tag, "count": count }))
+            .collect::<Vec<_>>()
+    })))
 }
 
 async fn get_doc_content(
@@ -336,6 +376,10 @@ async fn get_doc_content(
         .await?
         .ok_or_else(|| AppError::Internal("version missing".into()))?;
 
+    let mut tags_map = crate::services::metadata::tags_for_versions(&state.db, &[ver.id]).await?;
+    let mut desc_map =
+        crate::services::metadata::descriptions_for_versions(&state.db, &[ver.id]).await?;
+
     Ok(Json(DocContentDto {
         id: doc.id,
         path: doc.path,
@@ -345,6 +389,8 @@ async fn get_doc_content(
         commit_id: st.commit_id,
         size_bytes: ver.size_bytes,
         updated_at: st.updated_at,
+        tags: tags_map.remove(&ver.id).unwrap_or_default(),
+        description: desc_map.remove(&ver.id).flatten(),
     }))
 }
 
@@ -408,7 +454,9 @@ async fn save_doc(
         br.id,
         br.head_commit_id,
         cur.id,
-        &req.message.clone().unwrap_or_else(|| format!("edit {}", doc.path)),
+        &req.message
+            .clone()
+            .unwrap_or_else(|| format!("edit {}", doc.path)),
         "edit",
         vec![vcs::Change {
             document_id: doc.id,
@@ -473,7 +521,9 @@ async fn move_doc(
         .filter(|s| s.change_type != "deleted")
         .ok_or_else(|| AppError::NotFound("document not on this branch".into()))?;
     if doc.path == new_path {
-        return Ok(Json(serde_json::json!({ "id": doc_id, "path": new_path, "unchanged": true })));
+        return Ok(Json(
+            serde_json::json!({ "id": doc_id, "path": new_path, "unchanged": true }),
+        ));
     }
     check_path_free(&state.db, &proj, &states, &new_path, Some(doc_id)).await?;
 
@@ -486,8 +536,7 @@ async fn move_doc(
         br.id,
         br.head_commit_id,
         cur.id,
-        &req
-            .message
+        &req.message
             .clone()
             .unwrap_or_else(|| format!("move {old_path} -> {new_path}")),
         "edit",
@@ -581,7 +630,9 @@ async fn delete_doc(
     )
     .await?;
     txn.commit().await?;
-    Ok(Json(serde_json::json!({ "id": doc_id, "commit_id": commit.id })))
+    Ok(Json(
+        serde_json::json!({ "id": doc_id, "commit_id": commit.id }),
+    ))
 }
 
 // ---------- version history / diff / revert ----------
@@ -683,7 +734,10 @@ async fn doc_history(
                 created_at: c.map(|c| c.created_at).unwrap_or_default(),
                 change_type: cd.change_type.clone(),
                 version_id: cd.version_id,
-                size_bytes: cd.version_id.and_then(|v| sizes.get(&v).copied()).unwrap_or(0) as i64,
+                size_bytes: cd
+                    .version_id
+                    .and_then(|v| sizes.get(&v).copied())
+                    .unwrap_or(0) as i64,
                 current: Some(cd.commit_id) == current_commit,
             }
         })
@@ -705,7 +759,9 @@ async fn content_at_commit(
         .one(db)
         .await?;
     let Some(cd) = cd else { return Ok(None) };
-    let Some(vid) = cd.version_id else { return Ok(None) };
+    let Some(vid) = cd.version_id else {
+        return Ok(None);
+    };
     Ok(doc_version::Entity::find_by_id(vid)
         .one(db)
         .await?
@@ -752,11 +808,15 @@ async fn doc_diff(
     load_doc(&state.db, &proj, doc_id).await?;
 
     let old_content = match q.from {
-        Some(c) => content_at_commit(&state.db, doc_id, c).await?.unwrap_or_default(),
+        Some(c) => content_at_commit(&state.db, doc_id, c)
+            .await?
+            .unwrap_or_default(),
         None => String::new(),
     };
     let new_content = match q.to {
-        Some(c) => content_at_commit(&state.db, doc_id, c).await?.unwrap_or_default(),
+        Some(c) => content_at_commit(&state.db, doc_id, c)
+            .await?
+            .unwrap_or_default(),
         None => {
             let graph = vcs::CommitGraph::load(&state.db, proj.id).await?;
             let st = vcs::doc_state(&state.db, &graph, br.head_commit_id, doc_id).await?;
@@ -859,13 +919,13 @@ async fn search_docs(
 
         // 按路径排序，结果顺序稳定
         let mut ordered = alive;
-        ordered.sort_by_key(|(id, _)| {
-            by_id.get(id).map(|d| d.path.clone()).unwrap_or_default()
-        });
+        ordered.sort_by_key(|(id, _)| by_id.get(id).map(|d| d.path.clone()).unwrap_or_default());
 
         let mut texts: Vec<search::DocText> = Vec::new();
         for (doc_id, version_id) in ordered {
-            let Some(d) = by_id.get(&doc_id) else { continue };
+            let Some(d) = by_id.get(&doc_id) else {
+                continue;
+            };
             let Some(content) = contents.get(&version_id) else {
                 continue;
             };
@@ -921,7 +981,10 @@ async fn revert_doc(
 
     // no-op if the target revision already matches the branch state
     if let Some(cur_vid) = st.as_ref().and_then(|s| s.version_id) {
-        if let Some(cur_ver) = doc_version::Entity::find_by_id(cur_vid).one(&state.db).await? {
+        if let Some(cur_ver) = doc_version::Entity::find_by_id(cur_vid)
+            .one(&state.db)
+            .await?
+        {
             if cur_ver.content_hash == vcs::sha256_hex(&restored) {
                 return Ok(Json(serde_json::json!({
                     "id": doc_id, "unchanged": true, "version_id": cur_vid,
@@ -938,12 +1001,7 @@ async fn revert_doc(
     let message = req
         .message
         .filter(|m| !m.trim().is_empty())
-        .unwrap_or_else(|| {
-            format!(
-                "revert {path} to {}",
-                short_id(Some(req.commit_id))
-            )
-        });
+        .unwrap_or_else(|| format!("revert {path} to {}", short_id(Some(req.commit_id))));
     let commit = vcs::create_commit(
         &txn,
         proj.id,

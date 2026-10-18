@@ -65,6 +65,8 @@ export interface PublicDocContent {
   version_id: string
   updated_at: string
   size_bytes: number
+  tags: string[]
+  description: string | null
 }
 
 export interface PublicLinksDto {

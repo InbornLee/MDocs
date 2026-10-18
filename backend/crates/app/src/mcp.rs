@@ -33,11 +33,13 @@ use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder}
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::entities::{branch, document, project, project_member};
+use crate::entities::{
+    branch, commit, commit_doc, doc_version, document, project, project_member, user,
+};
 use crate::services::{
-    audit, heading,
+    attachment, audit, diff, heading,
     perm::{self, Role as ProjectRole},
-    search, snapshot, vcs,
+    snapshot, vcs,
 };
 use crate::state::AppState;
 
@@ -116,6 +118,10 @@ pub struct ReadDocArgs {
     pub doc_id: Option<String>,
     #[serde(default)]
     pub branch: Option<String>,
+    /// Read a specific version (UUID) instead of the branch head. The version
+    /// must belong to the same document; use get_history to list versions.
+    #[serde(default)]
+    pub version_id: Option<String>,
     /// Read only one section: a heading slug (e.g. "installation") or its title.
     #[serde(default)]
     pub section: Option<String>,
@@ -136,6 +142,9 @@ pub struct DocSummary {
     pub updated_at: String,
     /// Link to the reading view (absolute when APP_PUBLIC_BASE_URL is set).
     pub url: String,
+    /// Tags from the document front matter.
+    pub tags: Vec<String>,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -155,7 +164,12 @@ pub struct DocContent {
     pub url: String,
     pub commit_id: Option<String>,
     pub updated_at: String,
+    pub version_id: Option<String>,
+    /// True when this is the current version on the requested branch.
+    pub is_current: bool,
     pub content: String,
+    pub tags: Vec<String>,
+    pub description: Option<String>,
     /// 1-based line of the first returned line.
     pub line_start: usize,
     /// 1-based line of the last returned line.
@@ -199,6 +213,10 @@ pub struct SearchArgs {
     pub projects: Option<Vec<String>>,
     /// Substring to look for (case-insensitive) in titles and body text.
     pub query: String,
+    /// Only return documents with this front-matter tag (case-insensitive).
+    /// `tag:xxx` inside `query` works as well.
+    #[serde(default)]
+    pub tag: Option<String>,
     /// Maximum matches to return, 1-50 (default 10).
     #[serde(default)]
     pub limit: Option<usize>,
@@ -219,6 +237,11 @@ pub struct SearchHit {
     pub url: String,
     /// Heading slug of the section containing the first match.
     pub anchor: Option<String>,
+    /// Heading title of the matched section.
+    pub section: Option<String>,
+    /// 1-based line range of the matched chunk.
+    pub line_start: i32,
+    pub line_end: i32,
     pub commit_id: Option<String>,
     pub updated_at: String,
     /// Relevance score used for ordering (higher is better).
@@ -282,6 +305,110 @@ pub struct LinkGraph {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
     pub unreachable_count: usize,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HistoryArgs {
+    pub project: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub doc_id: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub offset: Option<usize>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct HistoryItem {
+    pub commit_id: String,
+    pub message: String,
+    pub commit_type: String,
+    pub author: String,
+    pub created_at: String,
+    pub change_type: String,
+    pub version_id: Option<String>,
+    pub size_bytes: i64,
+    /// True when this is the version currently on the branch head.
+    pub current: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct HistoryResult {
+    pub project: String,
+    pub branch: String,
+    pub document_id: String,
+    pub path: String,
+    pub count: usize,
+    pub items: Vec<HistoryItem>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DiffArgs {
+    pub project: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub doc_id: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Older version; defaults to the version right before `to_version`.
+    #[serde(default)]
+    pub from_version: Option<String>,
+    /// Newer version; defaults to the branch head.
+    #[serde(default)]
+    pub to_version: Option<String>,
+    /// Unified diff context lines (default 3, max 20).
+    #[serde(default)]
+    pub context: Option<usize>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DiffResult {
+    pub project: String,
+    pub branch: String,
+    pub path: String,
+    pub from_version: Option<String>,
+    pub to_version: Option<String>,
+    pub from_updated_at: Option<String>,
+    pub to_updated_at: Option<String>,
+    pub diff: String,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AttachmentArgs {
+    pub project: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub doc_id: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// List every attachment in the project (requires project membership).
+    #[serde(default)]
+    pub all: Option<bool>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AttachmentInfo {
+    pub path: String,
+    pub url: String,
+    pub mime: String,
+    pub size: i64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AttachmentResult {
+    pub project: String,
+    pub branch: String,
+    pub count: usize,
+    pub attachments: Vec<AttachmentInfo>,
+    /// References in the document that do not match a stored attachment.
+    pub missing: Vec<String>,
 }
 
 // ---------- caller / scope ----------
@@ -534,28 +661,6 @@ fn decode_path(path: &str) -> String {
         .to_string()
 }
 
-fn audit_call(
-    state: &AppState,
-    info: &CallerInfo,
-    tool: &str,
-    project: Option<String>,
-    detail: Option<String>,
-) {
-    audit::record(
-        state,
-        audit::AuditEntry {
-            user_id: info.user_id,
-            token_prefix: info.token_prefix.clone(),
-            client_ip: info.client_ip.clone(),
-            tool: tool.to_string(),
-            project,
-            detail,
-            ok: true,
-            error: None,
-        },
-    );
-}
-
 /// 一次工具调用的审计记录。
 ///
 /// `call_tool` 在调用前后各执行一次：`finish` 写入真实结果；如果实现 panic
@@ -585,6 +690,11 @@ impl<'a> ToolAudit<'a> {
             detail,
             written: false,
         }
+    }
+
+    /// resources / prompts 在入口才完成鉴权，成功后把调用者补进审计。
+    fn set_info(&mut self, info: &CallerInfo) {
+        self.info = info.clone();
     }
 
     fn write(&mut self, ok: bool, error: Option<String>) {
@@ -644,6 +754,23 @@ fn audit_project(args: &Option<serde_json::Map<String, serde_json::Value>>) -> O
         .filter(|s| !s.is_empty())
 }
 
+/// 支持在 query 里写 `tag:xxx`（可与关键词混用），显式 `tag` 参数优先。
+fn split_tag_query(q: &str) -> (String, Option<String>) {
+    let mut words = Vec::new();
+    let mut tag = None;
+    for part in q.split_whitespace() {
+        if let Some(t) = part.strip_prefix("tag:") {
+            let t = t.trim_matches('"').trim();
+            if !t.is_empty() {
+                tag = Some(t.to_string());
+            }
+        } else {
+            words.push(part);
+        }
+    }
+    (words.join(" "), tag)
+}
+
 /// 从工具参数里提取一小段可读摘要，不落文档正文。
 fn audit_detail(args: &Option<serde_json::Map<String, serde_json::Value>>) -> Option<String> {
     let a = args.as_ref()?;
@@ -668,26 +795,82 @@ fn ts(t: chrono::DateTime<chrono::Utc>) -> String {
     t.to_rfc3339()
 }
 
-fn snippet_at(content: &str, term: &str, idx: usize) -> String {
-    let start = idx.saturating_sub(160);
-    let end = (idx + term.len() + 240).min(content.len());
-    let mut s = start;
-    while s < content.len() && !content.is_char_boundary(s) {
-        s += 1;
+/// 从 Markdown 中提取相对图片/链接目标（附件候选）。
+fn referenced_assets(content: &str) -> Vec<String> {
+    let arena = comrak::Arena::new();
+    let root = comrak::parse_document(&arena, content, &comrak::Options::default());
+    let mut out = Vec::new();
+    for node in root.descendants() {
+        let data = node.data.borrow();
+        let url = match &data.value {
+            comrak::nodes::NodeValue::Image(l) | comrak::nodes::NodeValue::Link(l) => l.url.clone(),
+            _ => continue,
+        };
+        drop(data);
+        let url = url.trim();
+        if url.is_empty()
+            || url.starts_with('#')
+            || url.starts_with("http://")
+            || url.starts_with("https://")
+            || url.starts_with("mailto:")
+            || url.starts_with("data:")
+        {
+            continue;
+        }
+        let target = url.split('#').next().unwrap_or(url).trim();
+        // 文档之间的相对链接不是附件
+        if target.is_empty() || target.ends_with(".md") || target.ends_with(".markdown") {
+            continue;
+        }
+        out.push(target.to_string());
     }
-    let mut e = end;
-    while e < content.len() && !content.is_char_boundary(e) {
-        e += 1;
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn attachment_url(state: &AppState, project_id: Uuid, path: &str) -> String {
+    let rel = format!("/uploads/attachments/{project_id}/{}", encode_path(path));
+    match &state.cfg.public_base_url {
+        Some(base) if !base.trim().is_empty() => {
+            format!("{}{}", base.trim().trim_end_matches('/'), rel)
+        }
+        _ => rel,
     }
-    let mut out = String::new();
-    if s > 0 {
-        out.push('…');
+}
+
+async fn attachment_info(state: &AppState, project_id: Uuid, path: &str) -> AttachmentInfo {
+    let full = state
+        .cfg
+        .attachments_dir()
+        .join(project_id.to_string())
+        .join(path);
+    let size = tokio::fs::metadata(&full)
+        .await
+        .map(|m| m.len() as i64)
+        .unwrap_or(0);
+    AttachmentInfo {
+        path: path.to_string(),
+        url: attachment_url(state, project_id, path),
+        mime: mime_guess::from_path(path)
+            .first_or_octet_stream()
+            .to_string(),
+        size,
     }
-    out.push_str(content[s..e].trim());
-    if e < content.len() {
-        out.push('…');
-    }
-    out.replace('\n', " ")
+}
+
+async fn previous_version(
+    db: &sea_orm::DatabaseConnection,
+    doc_id: Uuid,
+    to: Uuid,
+) -> Result<Option<Uuid>, sea_orm::DbErr> {
+    let versions = doc_version::Entity::find()
+        .filter(doc_version::Column::DocumentId.eq(doc_id))
+        .order_by_desc(doc_version::Column::CreatedAt)
+        .all(db)
+        .await?;
+    let pos = versions.iter().position(|v| v.id == to);
+    Ok(pos.and_then(|i| versions.get(i + 1)).map(|v| v.id))
 }
 
 // ---------- tools ----------
@@ -875,6 +1058,21 @@ impl DocsServer {
         let snap = load_snapshot(&self.state, &sc).await?;
         let visible = visible_ids(&self.state, &sc, &snap).await?;
         let internal = sc.with_unpublished;
+        let version_ids: Vec<Uuid> = snap
+            .docs
+            .iter()
+            .filter(|d| visible.contains(&d.id))
+            .filter_map(|d| d.version_id)
+            .collect();
+        let tags = crate::services::metadata::tags_for_versions(&self.state.db, &version_ids)
+            .await
+            .map_err(crate::error::AppError::from)
+            .map_err(err)?;
+        let descriptions =
+            crate::services::metadata::descriptions_for_versions(&self.state.db, &version_ids)
+                .await
+                .map_err(crate::error::AppError::from)
+                .map_err(err)?;
 
         let documents: Vec<DocSummary> = snap
             .docs
@@ -887,6 +1085,14 @@ impl DocsServer {
                 size_bytes: d.size_bytes,
                 updated_at: ts(d.updated_at),
                 url: doc_url(&self.state, &sc.proj.slug, &d.path, internal),
+                tags: d
+                    .version_id
+                    .and_then(|v| tags.get(&v).cloned())
+                    .unwrap_or_default(),
+                description: d
+                    .version_id
+                    .and_then(|v| descriptions.get(&v).cloned())
+                    .flatten(),
             })
             .collect();
 
@@ -896,6 +1102,42 @@ impl DocsServer {
             count: documents.len(),
             documents,
         })
+    }
+
+    /// List front-matter tags with document counts.
+    #[tool(
+        name = "list_tags",
+        description = "List tags found in the front matter of the project's documents, with document counts. Use `tag` in search_documents to filter."
+    )]
+    async fn list_tags(
+        &self,
+        Parameters(args): Parameters<ProjectArgs>,
+        Extension(resolved): Extension<ResolvedCaller>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = resolved.caller;
+        let sc = scope(&self.state, &args.project, args.branch.as_deref(), caller).await?;
+        let snap = load_snapshot(&self.state, &sc).await?;
+        let visible = visible_ids(&self.state, &sc, &snap).await?;
+        let version_ids: Vec<Uuid> = snap
+            .docs
+            .iter()
+            .filter(|d| visible.contains(&d.id))
+            .filter_map(|d| d.version_id)
+            .collect();
+        let tags = crate::services::metadata::tag_counts(&self.state.db, &version_ids)
+            .await
+            .map_err(crate::error::AppError::from)
+            .map_err(err)?;
+        let items: Vec<serde_json::Value> = tags
+            .into_iter()
+            .map(|(tag, count)| serde_json::json!({ "tag": tag, "count": count }))
+            .collect();
+        to_result(&serde_json::json!({
+            "project": sc.proj.slug,
+            "branch": sc.br.name,
+            "count": items.len(),
+            "tags": items,
+        }))
     }
 
     /// Return the heading tree of one document.
@@ -998,20 +1240,50 @@ impl DocsServer {
                 )
             })?;
 
-        let total_lines = heading::line_count(&doc.content).max(1);
-        let total_bytes = doc.content.len();
+        let head_vid = doc.version_id;
+        let requested_vid = args
+            .version_id
+            .as_deref()
+            .map(|s| Uuid::parse_str(s.trim()))
+            .transpose()
+            .map_err(|_| McpError::invalid_params("version_id must be a UUID", None))?;
+        let (content, updated_at, version_id, is_current) = if let Some(vid) = requested_vid {
+            let ver = crate::entities::doc_version::Entity::find_by_id(vid)
+                .one(&self.state.db)
+                .await
+                .map_err(crate::error::AppError::from)
+                .map_err(err)?
+                .filter(|v| v.document_id == doc.id)
+                .ok_or_else(|| {
+                    McpError::resource_not_found(
+                        format!("version {vid} does not belong to this document"),
+                        None,
+                    )
+                })?;
+            (
+                ver.content,
+                ver.created_at,
+                Some(vid),
+                Some(vid) == head_vid,
+            )
+        } else {
+            (doc.content.clone(), doc.updated_at, head_vid, true)
+        };
+
+        let total_lines = heading::line_count(&content).max(1);
+        let total_bytes = content.len();
         let (mut body, line_start, line_end, section_title, truncated) =
             if let Some(sel) = args.section.as_deref().filter(|s| !s.trim().is_empty()) {
-                match heading::section_range(&doc.content, sel) {
+                match heading::section_range(&content, sel) {
                     Some((s, e, h)) => (
-                        heading::slice_lines(&doc.content, s, e),
+                        heading::slice_lines(&content, s, e),
                         s,
                         e,
                         Some(h.title),
                         false,
                     ),
                     None => {
-                        let available: Vec<String> = heading::outline(&doc.content)
+                        let available: Vec<String> = heading::outline(&content)
                             .into_iter()
                             .take(12)
                             .map(|h| h.slug)
@@ -1030,7 +1302,7 @@ impl DocsServer {
                 let limit = args.limit.unwrap_or(200).clamp(1, 5000);
                 let end = start.saturating_add(limit - 1).min(total_lines);
                 (
-                    heading::slice_lines(&doc.content, start, end),
+                    heading::slice_lines(&content, start, end),
                     start,
                     end,
                     None,
@@ -1038,7 +1310,7 @@ impl DocsServer {
                 )
             } else {
                 let (text, cut) =
-                    heading::truncate_bytes(&doc.content, self.state.cfg.mcp_max_content_bytes);
+                    heading::truncate_bytes(&content, self.state.cfg.mcp_max_content_bytes);
                 (text, 1, total_lines, None, cut)
             };
 
@@ -1047,15 +1319,41 @@ impl DocsServer {
             heading::truncate_bytes(&body, self.state.cfg.mcp_max_content_bytes);
         body = capped;
 
+        let (tags, description) = if let Some(vid) = doc.version_id {
+            let mut tags_map = crate::services::metadata::tags_for_versions(&self.state.db, &[vid])
+                .await
+                .map_err(crate::error::AppError::from)
+                .map_err(err)?;
+            let mut desc_map =
+                crate::services::metadata::descriptions_for_versions(&self.state.db, &[vid])
+                    .await
+                    .map_err(crate::error::AppError::from)
+                    .map_err(err)?;
+            (
+                tags_map.remove(&vid).unwrap_or_default(),
+                desc_map.remove(&vid).flatten(),
+            )
+        } else {
+            (Vec::new(), None)
+        };
+
         to_result(&DocContent {
             id: doc.id.to_string(),
             path: doc.path.clone(),
             title: doc.title.clone(),
             branch: sc.br.name.clone(),
             url: doc_url(&self.state, &sc.proj.slug, &doc.path, sc.with_unpublished),
-            commit_id: sc.br.head_commit_id.map(|v| v.to_string()),
-            updated_at: ts(doc.updated_at),
+            commit_id: if is_current {
+                sc.br.head_commit_id.map(|v| v.to_string())
+            } else {
+                None
+            },
+            updated_at: ts(updated_at),
+            version_id: version_id.map(|v| v.to_string()),
+            is_current,
             content: body,
+            tags,
+            description,
             line_start,
             line_end,
             total_lines,
@@ -1076,7 +1374,20 @@ impl DocsServer {
         Extension(resolved): Extension<ResolvedCaller>,
     ) -> Result<CallToolResult, McpError> {
         let caller = resolved.caller;
-        let q = args.query.trim();
+        let raw_q = args.query.trim();
+        let (text_q, inline_tag) = split_tag_query(raw_q);
+        let tag_filter = args
+            .tag
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .or(inline_tag);
+        let q = if text_q.is_empty() {
+            tag_filter.as_deref().unwrap_or(raw_q)
+        } else {
+            text_q.as_str()
+        };
         if q.is_empty() {
             return Err(McpError::invalid_params("query must not be empty", None));
         }
@@ -1093,6 +1404,20 @@ impl DocsServer {
         let limit = args.limit.unwrap_or(10).clamp(1, 50);
         let offset = args.offset.unwrap_or(0).min(2000);
 
+        // 混合检索：配置了 embedding 时先取查询向量；失败则自动降级为 BM25
+        let query_vec =
+            match crate::services::embedding::EmbeddingClient::from_config(&self.state.cfg) {
+                Some(client) => match client.embed_query(q).await {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        tracing::warn!("embedding query failed, falling back to BM25: {e}");
+                        None
+                    }
+                },
+                None => None,
+            };
+        let embedding_model = self.state.cfg.embedding.model.clone();
+
         let mut hits: Vec<SearchHit> = Vec::new();
         let mut seen_projects = Vec::new();
         for slug in targets.iter().take(20) {
@@ -1106,43 +1431,80 @@ impl DocsServer {
             let snap = load_snapshot(&self.state, &sc).await?;
             let visible = visible_ids(&self.state, &sc, &snap).await?;
             let internal = sc.with_unpublished;
-            for d in snap.docs.iter().filter(|d| visible.contains(&d.id)) {
-                let stats = search::count_matches(&d.content, q);
-                if stats.occurrences == 0
-                    && !d.title.to_lowercase().contains(&q.to_lowercase())
-                    && !d.path.to_lowercase().contains(&q.to_lowercase())
-                {
+            let mut version_ids: Vec<Uuid> = snap
+                .docs
+                .iter()
+                .filter(|d| visible.contains(&d.id))
+                .filter_map(|d| d.version_id)
+                .collect();
+            if version_ids.is_empty() {
+                continue;
+            }
+            if let Some(tag) = tag_filter.as_deref() {
+                let allowed =
+                    crate::services::metadata::versions_with_tag(&self.state.db, &version_ids, tag)
+                        .await
+                        .map_err(crate::error::AppError::from)
+                        .map_err(err)?;
+                version_ids.retain(|v| allowed.contains(v));
+                if version_ids.is_empty() {
                     continue;
                 }
-                let score = search::relevance_with_stats(&d.title, &d.path, &d.content, q, &stats);
-                let sn = stats
-                    .first_pos
-                    .map(|pos| snippet_at(&d.content, q, pos))
-                    .unwrap_or_default();
-                let anchor = stats
-                    .first_pos
-                    .and_then(|pos| heading::heading_at(&d.content, pos))
-                    .map(|h| h.slug);
+            }
+            // 回填尚未完成时，先为本次可见版本建索引
+            crate::services::index::ensure_versions(&self.state.db, &version_ids)
+                .await
+                .map_err(crate::error::AppError::from)
+                .map_err(err)?;
+
+            let found = crate::services::search_index::search_hybrid(
+                &self.state.db,
+                &version_ids,
+                q,
+                (limit + offset).max(10),
+                0,
+                query_vec.as_deref(),
+                if query_vec.is_some() {
+                    Some(embedding_model.as_str())
+                } else {
+                    None
+                },
+            )
+            .await
+            .map_err(crate::error::AppError::from)
+            .map_err(err)?;
+
+            // 同一篇文档的同一节只保留最高分的 chunk，避免重复 path
+            let mut best: HashMap<(Uuid, Option<String>), crate::services::search_index::Hit> =
+                HashMap::new();
+            for h in found {
+                let key = (h.document_id, h.anchor.clone());
+                match best.get(&key) {
+                    Some(prev) if prev.score >= h.score => {}
+                    _ => {
+                        best.insert(key, h);
+                    }
+                }
+            }
+            for h in best.into_values() {
+                let Some(d) = snap.doc_by_id(h.document_id) else {
+                    continue;
+                };
                 hits.push(SearchHit {
                     project: sc.proj.slug.clone(),
                     id: d.id.to_string(),
                     path: d.path.clone(),
                     title: d.title.clone(),
                     url: doc_url(&self.state, &sc.proj.slug, &d.path, internal),
-                    anchor,
+                    anchor: h.anchor.clone(),
+                    section: h.heading.clone(),
+                    line_start: h.start_line,
+                    line_end: h.end_line,
                     commit_id: sc.br.head_commit_id.map(|v| v.to_string()),
                     updated_at: ts(d.updated_at),
-                    score,
-                    snippet: if sn.is_empty() {
-                        d.content
-                            .chars()
-                            .take(200)
-                            .collect::<String>()
-                            .replace('\n', " ")
-                    } else {
-                        sn
-                    },
-                    occurrences: stats.occurrences,
+                    score: h.score,
+                    snippet: h.snippet,
+                    occurrences: 1,
                 });
             }
         }
@@ -1243,6 +1605,312 @@ impl DocsServer {
             unreachable_count,
         })
     }
+
+    /// Change history of one document on a branch.
+    #[tool(
+        name = "get_history",
+        description = "List the commit history of a document on a branch, newest first, including version ids. Use a version id with read_document(version_id=...) or get_diff."
+    )]
+    async fn get_history(
+        &self,
+        Parameters(args): Parameters<HistoryArgs>,
+        Extension(resolved): Extension<ResolvedCaller>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = resolved.caller;
+        let sc = scope(&self.state, &args.project, args.branch.as_deref(), caller).await?;
+        let snap = load_snapshot(&self.state, &sc).await?;
+        let visible = visible_ids(&self.state, &sc, &snap).await?;
+        let id = args
+            .doc_id
+            .as_deref()
+            .map(|s| Uuid::parse_str(s.trim()))
+            .transpose()
+            .map_err(|_| McpError::invalid_params("doc_id must be a UUID", None))?;
+        let doc = snap
+            .find_doc(args.path.as_deref(), id)
+            .filter(|d| visible.contains(&d.id))
+            .ok_or_else(|| {
+                McpError::resource_not_found(
+                    format!("no document matches in project '{}'", args.project),
+                    None,
+                )
+            })?;
+
+        let limit = args.limit.unwrap_or(20).clamp(1, 100);
+        let offset = args.offset.unwrap_or(0).min(1000);
+        let Some(head) = sc.br.head_commit_id else {
+            return to_result(&HistoryResult {
+                project: sc.proj.slug,
+                branch: sc.br.name,
+                document_id: doc.id.to_string(),
+                path: doc.path.clone(),
+                count: 0,
+                items: vec![],
+            });
+        };
+
+        let graph = vcs::CommitGraph::load(&self.state.db, sc.proj.id)
+            .await
+            .map_err(crate::error::AppError::from)
+            .map_err(err)?;
+        let chain = graph.chain(head);
+        let pos: HashMap<Uuid, usize> = chain.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+        let cds = commit_doc::Entity::find()
+            .filter(commit_doc::Column::DocumentId.eq(doc.id))
+            .filter(commit_doc::Column::CommitId.is_in(chain))
+            .all(&self.state.db)
+            .await
+            .map_err(crate::error::AppError::from)
+            .map_err(err)?;
+        let commit_ids: Vec<Uuid> = cds.iter().map(|c| c.commit_id).collect();
+        let commits = commit::Entity::find()
+            .filter(commit::Column::Id.is_in(commit_ids.clone()))
+            .all(&self.state.db)
+            .await
+            .map_err(crate::error::AppError::from)
+            .map_err(err)?;
+        let by_commit: HashMap<Uuid, commit::Model> =
+            commits.into_iter().map(|c| (c.id, c)).collect();
+        let author_ids: Vec<Uuid> = by_commit.values().map(|c| c.author_id).collect();
+        let users = user::Entity::find()
+            .filter(user::Column::Id.is_in(author_ids))
+            .all(&self.state.db)
+            .await
+            .map_err(crate::error::AppError::from)
+            .map_err(err)?;
+        let by_user: HashMap<Uuid, user::Model> = users.into_iter().map(|u| (u.id, u)).collect();
+        let ver_ids: Vec<Uuid> = cds.iter().filter_map(|c| c.version_id).collect();
+        let sizes: HashMap<Uuid, i32> = if ver_ids.is_empty() {
+            HashMap::new()
+        } else {
+            doc_version::Entity::find()
+                .filter(doc_version::Column::Id.is_in(ver_ids))
+                .all(&self.state.db)
+                .await
+                .map_err(crate::error::AppError::from)
+                .map_err(err)?
+                .into_iter()
+                .map(|v| (v.id, v.size_bytes))
+                .collect()
+        };
+
+        let mut items: Vec<(usize, HistoryItem)> = cds
+            .into_iter()
+            .map(|cd| {
+                let idx = pos.get(&cd.commit_id).copied().unwrap_or(usize::MAX);
+                let c = by_commit.get(&cd.commit_id);
+                let author = c
+                    .and_then(|c| by_user.get(&c.author_id))
+                    .map(|u| {
+                        if u.display_name.is_empty() {
+                            u.username.clone()
+                        } else {
+                            u.display_name.clone()
+                        }
+                    })
+                    .unwrap_or_default();
+                (
+                    idx,
+                    HistoryItem {
+                        commit_id: cd.commit_id.to_string(),
+                        message: c.map(|c| c.message.clone()).unwrap_or_default(),
+                        commit_type: c.map(|c| c.commit_type.clone()).unwrap_or_default(),
+                        author,
+                        created_at: c.map(|c| ts(c.created_at)).unwrap_or_default(),
+                        change_type: cd.change_type.clone(),
+                        size_bytes: cd
+                            .version_id
+                            .and_then(|v| sizes.get(&v).copied())
+                            .unwrap_or(0) as i64,
+                        version_id: cd.version_id.map(|v| v.to_string()),
+                        current: cd.version_id.is_some() && cd.version_id == doc.version_id,
+                    },
+                )
+            })
+            .collect();
+        items.sort_by_key(|(idx, _)| *idx);
+        let total = items.len();
+        let page: Vec<HistoryItem> = items
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|(_, item)| item)
+            .collect();
+
+        to_result(&HistoryResult {
+            project: sc.proj.slug,
+            branch: sc.br.name,
+            document_id: doc.id.to_string(),
+            path: doc.path.clone(),
+            count: total,
+            items: page,
+        })
+    }
+
+    /// Unified diff between two versions of a document.
+    #[tool(
+        name = "get_diff",
+        description = "Return a unified diff between two versions of a document. Defaults to the branch head vs. the version right before it; get version ids from get_history."
+    )]
+    async fn get_diff(
+        &self,
+        Parameters(args): Parameters<DiffArgs>,
+        Extension(resolved): Extension<ResolvedCaller>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = resolved.caller;
+        let sc = scope(&self.state, &args.project, args.branch.as_deref(), caller).await?;
+        let snap = load_snapshot(&self.state, &sc).await?;
+        let visible = visible_ids(&self.state, &sc, &snap).await?;
+        let id = args
+            .doc_id
+            .as_deref()
+            .map(|s| Uuid::parse_str(s.trim()))
+            .transpose()
+            .map_err(|_| McpError::invalid_params("doc_id must be a UUID", None))?;
+        let doc = snap
+            .find_doc(args.path.as_deref(), id)
+            .filter(|d| visible.contains(&d.id))
+            .ok_or_else(|| {
+                McpError::resource_not_found(
+                    format!("no document matches in project '{}'", args.project),
+                    None,
+                )
+            })?;
+
+        let parse_ver = |raw: Option<&str>| {
+            raw.map(|s| Uuid::parse_str(s.trim()))
+                .transpose()
+                .map_err(|_| McpError::invalid_params("version ids must be UUIDs", None))
+        };
+        let to_vid = parse_ver(args.to_version.as_deref())?.or(doc.version_id);
+        let Some(to_vid) = to_vid else {
+            return Err(McpError::invalid_params(
+                "document has no content to diff",
+                None,
+            ));
+        };
+        let from_vid = match parse_ver(args.from_version.as_deref())? {
+            Some(v) => Some(v),
+            None => previous_version(&self.state.db, doc.id, to_vid)
+                .await
+                .map_err(crate::error::AppError::from)
+                .map_err(err)?,
+        };
+
+        let load_ver = |vid: Uuid| async move {
+            doc_version::Entity::find_by_id(vid)
+                .one(&self.state.db)
+                .await
+                .map_err(crate::error::AppError::from)
+                .map_err(err)
+                .and_then(|v| {
+                    v.filter(|v| v.document_id == doc.id).ok_or_else(|| {
+                        McpError::resource_not_found(
+                            format!("version {vid} does not belong to this document"),
+                            None,
+                        )
+                    })
+                })
+        };
+        let to = load_ver(to_vid).await?;
+        let from = match from_vid {
+            Some(v) => Some(load_ver(v).await?),
+            None => None,
+        };
+
+        let old = from.as_ref().map(|v| v.content.as_str()).unwrap_or("");
+        let text = diff::unified(old, &to.content, args.context.unwrap_or(3).min(20));
+        let (text, truncated) =
+            heading::truncate_bytes(&text, self.state.cfg.mcp_max_content_bytes);
+
+        to_result(&DiffResult {
+            project: sc.proj.slug,
+            branch: sc.br.name,
+            path: doc.path.clone(),
+            from_version: from.as_ref().map(|v| v.id.to_string()),
+            to_version: Some(to.id.to_string()),
+            from_updated_at: from.as_ref().map(|v| ts(v.created_at)),
+            to_updated_at: Some(ts(to.created_at)),
+            diff: text,
+            truncated,
+        })
+    }
+
+    /// Attachments referenced by a document (or all project attachments).
+    #[tool(
+        name = "list_attachments",
+        description = "List attachments referenced by a document (relative images/links), with URLs and MIME types. Pass `all=true` to list every attachment in the project (requires membership)."
+    )]
+    async fn list_attachments(
+        &self,
+        Parameters(args): Parameters<AttachmentArgs>,
+        Extension(resolved): Extension<ResolvedCaller>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = resolved.caller;
+        let sc = scope(&self.state, &args.project, args.branch.as_deref(), caller).await?;
+        let all = attachment::list_all(&self.state, sc.proj.id)
+            .await
+            .map_err(err)?;
+        let all_set: HashSet<String> = all.iter().cloned().collect();
+
+        let mut paths: Vec<String> = Vec::new();
+        let mut missing: Vec<String> = Vec::new();
+        let want_all = args.all.unwrap_or(false) || (args.path.is_none() && args.doc_id.is_none());
+        if want_all {
+            if !sc.with_unpublished {
+                return Err(McpError::invalid_params(
+                    "listing all attachments requires project membership",
+                    None,
+                ));
+            }
+            paths = all;
+        } else {
+            let snap = load_snapshot(&self.state, &sc).await?;
+            let visible = visible_ids(&self.state, &sc, &snap).await?;
+            let id = args
+                .doc_id
+                .as_deref()
+                .map(|s| Uuid::parse_str(s.trim()))
+                .transpose()
+                .map_err(|_| McpError::invalid_params("doc_id must be a UUID", None))?;
+            let doc = snap
+                .find_doc(args.path.as_deref(), id)
+                .filter(|d| visible.contains(&d.id))
+                .ok_or_else(|| {
+                    McpError::resource_not_found(
+                        format!("no document matches in project '{}'", args.project),
+                        None,
+                    )
+                })?;
+            let dir = doc.path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+            for raw in referenced_assets(&doc.content) {
+                let candidate = crate::services::links::clean_path(dir, &raw)
+                    .or_else(|| crate::services::links::clean_path("", &raw));
+                match candidate {
+                    Some(p) if all_set.contains(&p) => paths.push(p),
+                    _ => missing.push(raw),
+                }
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        paths.truncate(500);
+
+        let mut attachments = Vec::with_capacity(paths.len());
+        for path in paths {
+            attachments.push(attachment_info(&self.state, sc.proj.id, &path).await);
+        }
+        missing.sort();
+        missing.dedup();
+
+        to_result(&AttachmentResult {
+            project: sc.proj.slug,
+            branch: sc.br.name,
+            count: attachments.len(),
+            attachments,
+            missing,
+        })
+    }
 }
 
 /// `#[tool_handler]` fills in `get_info` / `list_tools` / `call_tool`.
@@ -1303,69 +1971,85 @@ impl rmcp::ServerHandler for DocsServer {
         let Some(parts) = parts_of(&context) else {
             return Ok(ListResourcesResult::with_all_items(vec![]));
         };
-        let (caller, info) = caller(&self.state, parts).await?;
-        audit_call(&self.state, &info, "list_resources", None, None);
+        let mut audit = ToolAudit::new(
+            &self.state,
+            CallerInfo {
+                user_id: None,
+                token_prefix: None,
+                client_ip: client_ip(parts),
+            },
+            "list_resources",
+            None,
+            None,
+        );
+        let out = async {
+            let (caller, info) = caller(&self.state, parts).await?;
+            audit.set_info(&info);
 
-        let mut out = Vec::new();
-        for p in visible_projects(&self.state, caller)
-            .await?
-            .into_iter()
-            .take(10)
-        {
-            let Some(bid) = p.default_branch_id else {
-                continue;
-            };
-            let Some(br) = branch::Entity::find_by_id(bid)
-                .one(&self.state.db)
-                .await
-                .map_err(crate::error::AppError::from)
-                .map_err(err)?
-            else {
-                continue;
-            };
-            let can_read_all = match caller {
-                Caller::Anon => false,
-                Caller::User(uid) => {
-                    perm::project_role(&self.state.db, &p, uid)
-                        .await
-                        .map_err(err)?
-                        >= ProjectRole::Reader
-                }
-            };
-            let snap = snapshot::load(&self.state, p.id, br.id, br.head_commit_id)
-                .await
-                .map_err(err)?;
-            let published = if can_read_all {
-                None
-            } else {
-                Some(
-                    snapshot::published_ids(&self.state, p.id)
-                        .await
-                        .map_err(err)?,
-                )
-            };
-            for d in snap
-                .docs
-                .iter()
-                .filter(|d| published.as_ref().is_none_or(|ids| ids.contains(&d.id)))
-                .take(100)
+            let mut out = Vec::new();
+            for p in visible_projects(&self.state, caller)
+                .await?
+                .into_iter()
+                .take(10)
             {
-                out.push(
-                    Resource::new(
-                        format!("mdocs://{}/{}", p.slug, encode_path(&d.path)),
-                        d.path.clone(),
+                let Some(bid) = p.default_branch_id else {
+                    continue;
+                };
+                let Some(br) = branch::Entity::find_by_id(bid)
+                    .one(&self.state.db)
+                    .await
+                    .map_err(crate::error::AppError::from)
+                    .map_err(err)?
+                else {
+                    continue;
+                };
+                let can_read_all = match caller {
+                    Caller::Anon => false,
+                    Caller::User(uid) => {
+                        perm::project_role(&self.state.db, &p, uid)
+                            .await
+                            .map_err(err)?
+                            >= ProjectRole::Reader
+                    }
+                };
+                let snap = snapshot::load(&self.state, p.id, br.id, br.head_commit_id)
+                    .await
+                    .map_err(err)?;
+                let published = if can_read_all {
+                    None
+                } else {
+                    Some(
+                        snapshot::published_ids(&self.state, p.id)
+                            .await
+                            .map_err(err)?,
                     )
-                    .with_title(d.title.clone())
-                    .with_description(format!("{} · {}", p.slug, d.path))
-                    .with_mime_type("text/markdown")
-                    .with_size(d.size_bytes.max(0) as u64),
-                );
+                };
+                for d in snap
+                    .docs
+                    .iter()
+                    .filter(|d| published.as_ref().is_none_or(|ids| ids.contains(&d.id)))
+                    .take(100)
+                {
+                    out.push(
+                        Resource::new(
+                            format!("mdocs://{}/{}", p.slug, encode_path(&d.path)),
+                            d.path.clone(),
+                        )
+                        .with_title(d.title.clone())
+                        .with_description(format!("{} · {}", p.slug, d.path))
+                        .with_mime_type("text/markdown")
+                        .with_size(d.size_bytes.max(0) as u64),
+                    );
+                }
+                if out.len() >= 500 {
+                    break;
+                }
             }
-            if out.len() >= 500 {
-                break;
-            }
+            Ok(ListResourcesResult::with_all_items(out))
         }
-        Ok(ListResourcesResult::with_all_items(out))
+        .await;
+        audit.finish(&out);
+        out
     }
 
     async fn list_resource_templates(
@@ -1394,41 +2078,56 @@ impl rmcp::ServerHandler for DocsServer {
         let Some(parts) = parts_of(&context) else {
             return Err(McpError::invalid_request("missing request context", None));
         };
-        let (caller, info) = caller(&self.state, parts).await?;
-        audit_call(
-            &self.state,
-            &info,
-            "read_resource",
-            None,
-            Some(request.uri.clone()),
-        );
-
-        let rest = request
+        let project = request
             .uri
             .strip_prefix("mdocs://")
-            .ok_or_else(|| McpError::invalid_params("uri must start with mdocs://", None))?;
-        let (slug, raw_path) = rest.split_once('/').ok_or_else(|| {
-            McpError::invalid_params("uri must be mdocs://{project}/{path}", None)
-        })?;
-        let path = decode_path(raw_path);
+            .and_then(|rest| rest.split_once('/'))
+            .map(|(slug, _)| slug.to_string());
+        let mut audit = ToolAudit::new(
+            &self.state,
+            CallerInfo {
+                user_id: None,
+                token_prefix: None,
+                client_ip: client_ip(parts),
+            },
+            "read_resource",
+            project,
+            Some(request.uri.clone()),
+        );
+        let out = async {
+            let (caller, info) = caller(&self.state, parts).await?;
+            audit.set_info(&info);
 
-        let sc = scope(&self.state, slug, None, caller).await?;
-        let snap = load_snapshot(&self.state, &sc).await?;
-        let visible = visible_ids(&self.state, &sc, &snap).await?;
-        let doc = snap
-            .find_doc(Some(&path), None)
-            .filter(|d| visible.contains(&d.id))
-            .ok_or_else(|| {
-                McpError::resource_not_found(
-                    format!("no document '{}' in project '{}'", path, slug),
-                    None,
-                )
+            let rest = request
+                .uri
+                .strip_prefix("mdocs://")
+                .ok_or_else(|| McpError::invalid_params("uri must start with mdocs://", None))?;
+            let (slug, raw_path) = rest.split_once('/').ok_or_else(|| {
+                McpError::invalid_params("uri must be mdocs://{project}/{path}", None)
             })?;
+            let path = decode_path(raw_path);
 
-        Ok(ReadResourceResponse::Complete(ReadResourceResult::new(
-            vec![ResourceContents::text(doc.content.clone(), request.uri)
-                .with_mime_type("text/markdown")],
-        )))
+            let sc = scope(&self.state, slug, None, caller).await?;
+            let snap = load_snapshot(&self.state, &sc).await?;
+            let visible = visible_ids(&self.state, &sc, &snap).await?;
+            let doc = snap
+                .find_doc(Some(&path), None)
+                .filter(|d| visible.contains(&d.id))
+                .ok_or_else(|| {
+                    McpError::resource_not_found(
+                        format!("no document '{}' in project '{}'", path, slug),
+                        None,
+                    )
+                })?;
+
+            Ok(ReadResourceResponse::Complete(ReadResourceResult::new(
+                vec![ResourceContents::text(doc.content.clone(), request.uri)
+                    .with_mime_type("text/markdown")],
+            )))
+        }
+        .await;
+        audit.finish(&out);
+        out
     }
 
     async fn list_prompts(

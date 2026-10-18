@@ -23,7 +23,7 @@
 #   --build-arg CARGO_REGISTRY_MIRROR=
 
 # ---------- stage 1: frontend ----------
-FROM node:24-alpine AS frontend
+FROM node:24-bookworm-slim AS frontend
 WORKDIR /fe
 
 # npm registry (npmmirror); empty = registry.npmjs.org
@@ -41,7 +41,7 @@ COPY frontend/ ./
 RUN npx vite build --outDir /out --emptyOutDir
 
 # ---------- stage 2: backend ----------
-FROM rust:1.97-slim AS backend
+FROM rust:1.97-slim-bookworm AS backend
 WORKDIR /app
 
 # crates.io index (rsproxy); empty = crates.io

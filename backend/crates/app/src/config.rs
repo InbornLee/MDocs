@@ -1,5 +1,16 @@
 use std::{env, path::PathBuf};
 
+/// OpenAI 兼容的 embedding 服务（Ollama / vLLM / 云端均可）。
+/// 未设置 `APP_EMBEDDING__URL` 时混合检索自动降级为纯 BM25。
+#[derive(Clone, Debug)]
+pub struct EmbeddingConfig {
+    pub url: Option<String>,
+    pub model: String,
+    pub api_key: Option<String>,
+    pub batch_size: usize,
+    pub timeout_secs: u64,
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     /// e.g. "0.0.0.0:8080"
@@ -20,6 +31,7 @@ pub struct Config {
     pub snapshot_cache_size: usize,
     /// 对外站点基地址（用于 MCP 返回绝对链接），如 https://docs.example.com
     pub public_base_url: Option<String>,
+    pub embedding: EmbeddingConfig,
 }
 
 impl Config {
@@ -61,6 +73,18 @@ impl Config {
                 .ok()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
+            embedding: EmbeddingConfig {
+                url: env::var("APP_EMBEDDING__URL")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+                model: env::var("APP_EMBEDDING__MODEL").unwrap_or_else(|_| "bge-m3".to_string()),
+                api_key: env::var("APP_EMBEDDING__API_KEY")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty()),
+                batch_size: env_usize("APP_EMBEDDING__BATCH_SIZE", 16).clamp(1, 128),
+                timeout_secs: env_usize("APP_EMBEDDING__TIMEOUT_SECS", 30).max(1) as u64,
+            },
         }
     }
 

@@ -47,7 +47,11 @@ async fn update_profile(
         if bio.len() > 2000 {
             return Err(AppError::BadRequest("bio too long".into()));
         }
-        m.bio = Set(if bio.is_empty() { None } else { Some(bio.clone()) });
+        m.bio = Set(if bio.is_empty() {
+            None
+        } else {
+            Some(bio.clone())
+        });
     }
     if let Some(email) = &req.email {
         if !email.contains('@') || email.len() > 255 {
@@ -125,7 +129,10 @@ async fn get_avatar(Path(file): Path<String>) -> AppResult<Response> {
         return Err(AppError::BadRequest("invalid file name".into()));
     }
     let cfg_dir = std::env::var("APP_DATA_DIR").unwrap_or_else(|_| "./data".into());
-    let path = std::path::Path::new(&cfg_dir).join("uploads").join("avatars").join(&file);
+    let path = std::path::Path::new(&cfg_dir)
+        .join("uploads")
+        .join("avatars")
+        .join(&file);
     let data = tokio::fs::read(&path)
         .await
         .map_err(|_| AppError::NotFound("avatar not found".into()))?;
@@ -160,7 +167,9 @@ async fn change_password(
         return Err(AppError::BadRequest("current password is incorrect".into()));
     }
     if req.new_password.len() < 8 {
-        return Err(AppError::BadRequest("password must be at least 8 chars".into()));
+        return Err(AppError::BadRequest(
+            "password must be at least 8 chars".into(),
+        ));
     }
     if req.new_password == req.old_password {
         return Err(AppError::BadRequest(

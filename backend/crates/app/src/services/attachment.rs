@@ -34,7 +34,10 @@ pub fn validate_asset_path(path: &str) -> AppResult<()> {
     if path.contains('\\') || path.contains('\0') || path.contains(':') {
         return Err(bad());
     }
-    if path.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..") {
+    if path
+        .split('/')
+        .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+    {
         return Err(bad());
     }
     Ok(())

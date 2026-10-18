@@ -7,8 +7,7 @@ use axum::{
 };
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set,
-    TransactionTrait,
+    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -23,7 +22,9 @@ pub fn routes() -> Router<AppState> {
         .route("/api/projects", get(list_projects).post(create_project))
         .route(
             "/api/projects/{slug}",
-            get(get_project_detail).patch(update_project).delete(delete_project),
+            get(get_project_detail)
+                .patch(update_project)
+                .delete(delete_project),
         )
         .route(
             "/api/projects/{slug}/branches",
@@ -132,13 +133,24 @@ async fn create_project(
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| slugify(&name));
-    if slug.is_empty() || slug.len() > 64 || !slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
-        return Err(AppError::BadRequest("slug must be 1-64 chars of [a-z0-9-]".into()));
+    if slug.is_empty()
+        || slug.len() > 64
+        || !slug
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(AppError::BadRequest(
+            "slug must be 1-64 chars of [a-z0-9-]".into(),
+        ));
     }
     let visibility = match req.visibility.as_deref() {
         Some("public") => "public",
         Some("private") | None => "private",
-        _ => return Err(AppError::BadRequest("visibility must be public|private".into())),
+        _ => {
+            return Err(AppError::BadRequest(
+                "visibility must be public|private".into(),
+            ))
+        }
     };
 
     let exists = project::Entity::find()
@@ -192,7 +204,12 @@ async fn create_project(
 
     txn.commit().await?;
 
-    Ok(Json(to_dto(&proj, Role::Owner, Some("main".into()), cur.id)))
+    Ok(Json(to_dto(
+        &proj,
+        Role::Owner,
+        Some("main".into()),
+        cur.id,
+    )))
 }
 
 async fn list_projects(
@@ -309,7 +326,11 @@ async fn update_project(
     if let Some(v) = &req.visibility {
         match v.as_str() {
             "public" | "private" => am.visibility = Set(v.clone()),
-            _ => return Err(AppError::BadRequest("visibility must be public|private".into())),
+            _ => {
+                return Err(AppError::BadRequest(
+                    "visibility must be public|private".into(),
+                ))
+            }
         }
     }
     am.updated_at = Set(Utc::now());

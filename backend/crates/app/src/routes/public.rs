@@ -12,13 +12,13 @@ use axum::{
     Json, Router,
 };
 use chrono::{DateTime, Utc};
-use sea_orm::{
-    ColumnTrait, Condition, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
-};
+use sea_orm::{ColumnTrait, Condition, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::entities::{branch, commit, commit_doc, document, doc_version, link_edge, project, user};
+use crate::entities::{
+    branch, commit, commit_doc, doc_version, document, link_edge, project, user,
+};
 use crate::error::{AppError, AppResult};
 use crate::services::{diff, search, site, vcs};
 use crate::state::AppState;
@@ -41,6 +41,7 @@ pub fn routes() -> Router<AppState> {
             "/api/public/projects/{slug}/docs/{doc_id}/diff",
             get(doc_diff),
         )
+        .route("/api/public/projects/{slug}/tags", get(list_tags))
         .route("/api/public/projects/{slug}/search", get(search_docs))
 }
 
@@ -192,7 +193,10 @@ async fn list_projects(
             slug: p.slug.clone(),
             name: p.name.clone(),
             description: p.description.clone(),
-            owner_name: by_owner.get(&p.owner_id).map(owner_name).unwrap_or_default(),
+            owner_name: by_owner
+                .get(&p.owner_id)
+                .map(owner_name)
+                .unwrap_or_default(),
             doc_count: docs.len(),
             updated_at: p.updated_at,
         });
@@ -291,7 +295,10 @@ async fn get_project(
                 .and_then(|s| s.version_id)
                 .and_then(|v| sizes.get(&v).copied())
                 .unwrap_or(0) as i64,
-            updated_at: states.get(&d.id).map(|s| s.updated_at).unwrap_or(d.updated_at),
+            updated_at: states
+                .get(&d.id)
+                .map(|s| s.updated_at)
+                .unwrap_or(d.updated_at),
         })
         .collect();
     items.sort_by(|a, b| a.path.cmp(&b.path));
@@ -309,10 +316,15 @@ async fn get_project(
     let link_summary = LinkSummary {
         nodes: items.len(),
         edges: visible_edges.len(),
-        dangling: visible_edges.iter().filter(|e| e.target_doc_id.is_none()).count(),
+        dangling: visible_edges
+            .iter()
+            .filter(|e| e.target_doc_id.is_none())
+            .count(),
     };
 
-    let owner = user::Entity::find_by_id(proj.owner_id).one(&state.db).await?;
+    let owner = user::Entity::find_by_id(proj.owner_id)
+        .one(&state.db)
+        .await?;
 
     Ok(Json(PublicProjectDetail {
         id: proj.id,
@@ -356,6 +368,8 @@ struct PublicDocContent {
     version_id: Uuid,
     updated_at: DateTime<Utc>,
     size_bytes: i32,
+    tags: Vec<String>,
+    description: Option<String>,
 }
 
 /// Ensure the document belongs to the public project AND is published.
@@ -369,6 +383,29 @@ pub(crate) async fn published_doc(
         .await?
         .filter(|d| d.project_id == proj.id && d.published)
         .ok_or_else(|| AppError::NotFound("document not published".into()))
+}
+
+async fn list_tags(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    Query(q): Query<BranchQueryArg>,
+) -> AppResult<Json<serde_json::Value>> {
+    let proj = public_project(&state, &slug).await?;
+    let br = default_branch(&state, &proj, q.branch.as_deref()).await?;
+    let docs = published_docs(&state, &proj, br.head_commit_id).await?;
+    let graph = vcs::CommitGraph::load(&state.db, proj.id).await?;
+    let states = vcs::branch_doc_states(&state.db, &graph, br.head_commit_id).await?;
+    let version_ids: Vec<Uuid> = docs
+        .iter()
+        .filter_map(|d| states.get(&d.id).and_then(|s| s.version_id))
+        .collect();
+    let tags = crate::services::metadata::tag_counts(&state.db, &version_ids).await?;
+    Ok(Json(serde_json::json!({
+        "tags": tags
+            .into_iter()
+            .map(|(tag, count)| serde_json::json!({ "tag": tag, "count": count }))
+            .collect::<Vec<_>>()
+    })))
 }
 
 async fn get_doc_content(
@@ -393,6 +430,10 @@ async fn get_doc_content(
         .await?
         .ok_or_else(|| AppError::Internal("version missing".into()))?;
 
+    let mut tags_map = crate::services::metadata::tags_for_versions(&state.db, &[ver.id]).await?;
+    let mut desc_map =
+        crate::services::metadata::descriptions_for_versions(&state.db, &[ver.id]).await?;
+
     Ok(Json(PublicDocContent {
         id: doc.id,
         path: doc.path,
@@ -401,6 +442,8 @@ async fn get_doc_content(
         version_id: ver.id,
         updated_at: st.updated_at,
         size_bytes: ver.size_bytes,
+        tags: tags_map.remove(&ver.id).unwrap_or_default(),
+        description: desc_map.remove(&ver.id).flatten(),
     }))
 }
 
@@ -588,18 +631,16 @@ struct PublicDiff {
     diff: String,
 }
 
-async fn content_at(
-    state: &AppState,
-    doc_id: Uuid,
-    commit_id: Uuid,
-) -> AppResult<Option<String>> {
+async fn content_at(state: &AppState, doc_id: Uuid, commit_id: Uuid) -> AppResult<Option<String>> {
     let cd = commit_doc::Entity::find()
         .filter(commit_doc::Column::DocumentId.eq(doc_id))
         .filter(commit_doc::Column::CommitId.eq(commit_id))
         .one(&state.db)
         .await?;
     let Some(cd) = cd else { return Ok(None) };
-    let Some(vid) = cd.version_id else { return Ok(None) };
+    let Some(vid) = cd.version_id else {
+        return Ok(None);
+    };
     Ok(doc_version::Entity::find_by_id(vid)
         .one(&state.db)
         .await?
@@ -692,7 +733,10 @@ async fn search_docs(
         .filter_map(|s| s.version_id.map(|v| (s.document_id, v)))
         .collect();
 
-    let ver_ids: Vec<Uuid> = docs.iter().filter_map(|d| versions.get(&d.id).copied()).collect();
+    let ver_ids: Vec<Uuid> = docs
+        .iter()
+        .filter_map(|d| versions.get(&d.id).copied())
+        .collect();
     let contents: HashMap<Uuid, String> = if ver_ids.is_empty() {
         HashMap::new()
     } else {
@@ -711,7 +755,9 @@ async fn search_docs(
 
     let mut texts: Vec<search::DocText> = Vec::new();
     for d in &ordered {
-        let Some(vid) = versions.get(&d.id) else { continue };
+        let Some(vid) = versions.get(&d.id) else {
+            continue;
+        };
         let Some(content) = contents.get(vid) else {
             continue;
         };

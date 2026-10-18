@@ -72,7 +72,9 @@ pub async fn require_role(
 ) -> AppResult<Role> {
     let role = project_role(db, proj, user_id).await?;
     if role < need {
-        return Err(AppError::Forbidden("insufficient project permission".into()));
+        return Err(AppError::Forbidden(
+            "insufficient project permission".into(),
+        ));
     }
     Ok(role)
 }

@@ -82,7 +82,9 @@ async fn list_members(
 
     let mut out: Vec<MemberDto> = Vec::with_capacity(rows.len());
     for r in rows {
-        let Some(u) = by_id.remove(&r.user_id) else { continue };
+        let Some(u) = by_id.remove(&r.user_id) else {
+            continue;
+        };
         out.push(MemberDto {
             user_id: u.id,
             username: u.username,
@@ -178,7 +180,9 @@ fn parse_role(s: &str) -> AppResult<&'static str> {
         "owner" => Ok("owner"),
         "editor" => Ok("editor"),
         "reader" => Ok("reader"),
-        _ => Err(AppError::BadRequest("role must be owner|editor|reader".into())),
+        _ => Err(AppError::BadRequest(
+            "role must be owner|editor|reader".into(),
+        )),
     }
 }
 
@@ -202,7 +206,9 @@ async fn add_member(
     let role = parse_role(req.role.as_deref().unwrap_or("editor"))?;
     let key = req.user.trim();
     if key.is_empty() {
-        return Err(AppError::BadRequest("user (username or email) required".into()));
+        return Err(AppError::BadRequest(
+            "user (username or email) required".into(),
+        ));
     }
 
     let target = user::Entity::find()
@@ -262,7 +268,9 @@ async fn update_member(
     let proj = perm::get_project(&state.db, &slug).await?;
     perm::require_role(&state.db, &proj, cur.id, Role::Owner).await?;
     if user_id == proj.owner_id {
-        return Err(AppError::BadRequest("cannot change the owner's role".into()));
+        return Err(AppError::BadRequest(
+            "cannot change the owner's role".into(),
+        ));
     }
     let role = parse_role(&req.role)?;
     let m = project_member::Entity::find()
@@ -274,7 +282,9 @@ async fn update_member(
     let mut am = m.into_active_model();
     am.role = Set(role.to_string());
     let updated = am.update(&state.db).await?;
-    Ok(Json(serde_json::json!({ "user_id": user_id, "role": updated.role })))
+    Ok(Json(
+        serde_json::json!({ "user_id": user_id, "role": updated.role }),
+    ))
 }
 
 async fn remove_member(

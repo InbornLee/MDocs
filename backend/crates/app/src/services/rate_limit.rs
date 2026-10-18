@@ -28,6 +28,15 @@ struct Bucket {
     count: u32,
 }
 
+/// 一次限流检查的结果，直接映射到 `RateLimit-*` / `Retry-After` 响应头。
+pub struct LimitInfo {
+    pub allowed: bool,
+    pub limit: u32,
+    pub remaining: u32,
+    /// 当前窗口剩余秒数
+    pub reset_after: u64,
+}
+
 pub struct RateLimiter {
     limit: u32,
     inner: Mutex<HashMap<String, Bucket>>,
@@ -46,14 +55,25 @@ impl RateLimiter {
         self.limit > 0
     }
 
-    /// 返回 true 表示本次请求放行。
-    pub fn check(&self, key: &str) -> bool {
+    /// 检查并消耗一次额度；返回值同时用于响应头。
+    pub fn check(&self, key: &str) -> LimitInfo {
         if self.limit == 0 {
-            return true;
+            return LimitInfo {
+                allowed: true,
+                limit: 0,
+                remaining: 0,
+                reset_after: 0,
+            };
         }
         let now = Instant::now();
         let Ok(mut map) = self.inner.lock() else {
-            return true;
+            // 锁中毒时放行，避免限流器故障拖垮整个端点
+            return LimitInfo {
+                allowed: true,
+                limit: self.limit,
+                remaining: self.limit,
+                reset_after: WINDOW.as_secs(),
+            };
         };
         if map.len() > SWEEP_THRESHOLD {
             map.retain(|_, b| {
@@ -65,16 +85,34 @@ impl RateLimiter {
         let bucket = map.entry(key.to_string()).or_default();
         match bucket.started {
             Some(start) if now.duration_since(start) < WINDOW => {
+                let elapsed = now.duration_since(start);
+                let reset_after = WINDOW.saturating_sub(elapsed).as_secs().max(1);
                 if bucket.count >= self.limit {
-                    return false;
+                    LimitInfo {
+                        allowed: false,
+                        limit: self.limit,
+                        remaining: 0,
+                        reset_after,
+                    }
+                } else {
+                    bucket.count += 1;
+                    LimitInfo {
+                        allowed: true,
+                        limit: self.limit,
+                        remaining: self.limit - bucket.count,
+                        reset_after,
+                    }
                 }
-                bucket.count += 1;
-                true
             }
             _ => {
                 bucket.started = Some(now);
                 bucket.count = 1;
-                true
+                LimitInfo {
+                    allowed: true,
+                    limit: self.limit,
+                    remaining: self.limit.saturating_sub(1),
+                    reset_after: WINDOW.as_secs(),
+                }
             }
         }
     }
@@ -116,19 +154,39 @@ fn token_key(req: &Request) -> String {
     }
 }
 
+fn header_value(n: u64) -> axum::http::HeaderValue {
+    axum::http::HeaderValue::from_str(&n.to_string())
+        .unwrap_or_else(|_| axum::http::HeaderValue::from_static("0"))
+}
+
 /// axum 中间件：挂在 `/mcp` 外层。
 pub async fn middleware(State(state): State<AppState>, req: Request, next: Next) -> Response {
-    if state.rate_limiter.enabled() {
-        let key = format!("{}|{}", client_ip(&req), token_key(&req));
-        if !state.rate_limiter.check(&key) {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(serde_json::json!({
-                    "error": "MCP rate limit exceeded, retry in a minute"
-                })),
-            )
-                .into_response();
-        }
+    if !state.rate_limiter.enabled() {
+        return next.run(req).await;
     }
-    next.run(req).await
+
+    let key = format!("{}|{}", client_ip(&req), token_key(&req));
+    let info = state.rate_limiter.check(&key);
+
+    let mut resp = if info.allowed {
+        next.run(req).await
+    } else {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "error": "MCP rate limit exceeded, retry later",
+                "retry_after_seconds": info.reset_after,
+            })),
+        )
+            .into_response()
+    };
+
+    let headers = resp.headers_mut();
+    headers.insert("ratelimit-limit", header_value(info.limit as u64));
+    headers.insert("ratelimit-remaining", header_value(info.remaining as u64));
+    headers.insert("ratelimit-reset", header_value(info.reset_after));
+    if !info.allowed {
+        headers.insert(header::RETRY_AFTER, header_value(info.reset_after));
+    }
+    resp
 }

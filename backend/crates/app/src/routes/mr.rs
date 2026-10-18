@@ -14,15 +14,12 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set,
-    TransactionTrait,
+    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::entities::{
-    branch, document, doc_version, merge_request, mr_review, project, user,
-};
+use crate::entities::{branch, doc_version, document, merge_request, mr_review, project, user};
 use crate::error::{AppError, AppResult};
 use crate::services::{
     auth::CurrentUser, links, links::LinkUpdate, merge, perm, perm::Role, vcs, vcs::DocState,
@@ -31,15 +28,9 @@ use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route(
-            "/api/projects/{slug}/mrs",
-            get(list_mrs).post(create_mr),
-        )
+        .route("/api/projects/{slug}/mrs", get(list_mrs).post(create_mr))
         .route("/api/projects/{slug}/mrs/{mr_id}", get(get_mr_detail))
-        .route(
-            "/api/projects/{slug}/mrs/{mr_id}/reviews",
-            post(add_review),
-        )
+        .route("/api/projects/{slug}/mrs/{mr_id}/reviews", post(add_review))
         .route("/api/projects/{slug}/mrs/{mr_id}/merge", post(merge_mr))
         .route("/api/projects/{slug}/mrs/{mr_id}/close", post(close_mr))
 }
@@ -150,7 +141,11 @@ async fn compute_plan(
 
     // collect needed version contents in one query
     let mut ver_ids: Vec<Uuid> = Vec::new();
-    for st in states_base.values().chain(states_ours.values()).chain(states_theirs.values()) {
+    for st in states_base
+        .values()
+        .chain(states_ours.values())
+        .chain(states_theirs.values())
+    {
         if let Some(v) = st.version_id {
             ver_ids.push(v);
         }
@@ -166,7 +161,9 @@ async fn compute_plan(
 
     let mut plan: Vec<FilePlan> = Vec::new();
     for id in ids {
-        let Some(doc) = doc_by_id.get(&id) else { continue };
+        let Some(doc) = doc_by_id.get(&id) else {
+            continue;
+        };
         let b = states_base.get(&id);
         let o = states_ours.get(&id);
         let t = states_theirs.get(&id);
@@ -179,16 +176,26 @@ async fn compute_plan(
         // target untouched: take theirs verbatim
         if state_key(o) == state_key(b) {
             if is_alive(t) {
-                let content = t.and_then(|s| s.version_id).and_then(|v| contents.get(&v).cloned());
+                let content = t
+                    .and_then(|s| s.version_id)
+                    .and_then(|v| contents.get(&v).cloned());
                 plan.push(FilePlan {
                     document_id: id,
                     path: doc.path.clone(),
                     title: doc.title.clone(),
-                    change: if is_alive(b) { "modified".into() } else { "added".into() },
+                    change: if is_alive(b) {
+                        "modified".into()
+                    } else {
+                        "added".into()
+                    },
                     has_conflict: false,
                     conflict_kind: None,
-                    base_content: b.and_then(|s| s.version_id).and_then(|v| contents.get(&v).cloned()),
-                    ours_content: o.and_then(|s| s.version_id).and_then(|v| contents.get(&v).cloned()),
+                    base_content: b
+                        .and_then(|s| s.version_id)
+                        .and_then(|v| contents.get(&v).cloned()),
+                    ours_content: o
+                        .and_then(|s| s.version_id)
+                        .and_then(|v| contents.get(&v).cloned()),
                     theirs_content: content.clone(),
                     merged_content: content,
                 });
@@ -200,8 +207,12 @@ async fn compute_plan(
                     change: "deleted".into(),
                     has_conflict: false,
                     conflict_kind: None,
-                    base_content: b.and_then(|s| s.version_id).and_then(|v| contents.get(&v).cloned()),
-                    ours_content: o.and_then(|s| s.version_id).and_then(|v| contents.get(&v).cloned()),
+                    base_content: b
+                        .and_then(|s| s.version_id)
+                        .and_then(|v| contents.get(&v).cloned()),
+                    ours_content: o
+                        .and_then(|s| s.version_id)
+                        .and_then(|v| contents.get(&v).cloned()),
                     theirs_content: None,
                     merged_content: None,
                 });
@@ -220,7 +231,9 @@ async fn compute_plan(
                     change: "deleted".into(),
                     has_conflict: false,
                     conflict_kind: None,
-                    base_content: b.and_then(|s| s.version_id).and_then(|v| contents.get(&v).cloned()),
+                    base_content: b
+                        .and_then(|s| s.version_id)
+                        .and_then(|v| contents.get(&v).cloned()),
                     ours_content: None,
                     theirs_content: None,
                     merged_content: None,
@@ -232,16 +245,28 @@ async fn compute_plan(
                     document_id: id,
                     path: doc.path.clone(),
                     title: doc.title.clone(),
-                    change: if is_alive(t) { "modified".into() } else { "deleted".into() },
+                    change: if is_alive(t) {
+                        "modified".into()
+                    } else {
+                        "deleted".into()
+                    },
                     has_conflict: true,
                     conflict_kind: Some("modify-delete".into()),
-                    base_content: b.and_then(|s| s.version_id).and_then(|v| contents.get(&v).cloned()),
-                    ours_content: o.and_then(|s| s.version_id).and_then(|v| contents.get(&v).cloned()),
-                    theirs_content: t.and_then(|s| s.version_id).and_then(|v| contents.get(&v).cloned()),
+                    base_content: b
+                        .and_then(|s| s.version_id)
+                        .and_then(|v| contents.get(&v).cloned()),
+                    ours_content: o
+                        .and_then(|s| s.version_id)
+                        .and_then(|v| contents.get(&v).cloned()),
+                    theirs_content: t
+                        .and_then(|s| s.version_id)
+                        .and_then(|v| contents.get(&v).cloned()),
                     merged_content: if is_alive(o) {
-                        o.and_then(|s| s.version_id).and_then(|v| contents.get(&v).cloned())
+                        o.and_then(|s| s.version_id)
+                            .and_then(|v| contents.get(&v).cloned())
                     } else {
-                        t.and_then(|s| s.version_id).and_then(|v| contents.get(&v).cloned())
+                        t.and_then(|s| s.version_id)
+                            .and_then(|v| contents.get(&v).cloned())
                     },
                 });
             }
@@ -266,9 +291,15 @@ async fn compute_plan(
                     change: "modified".into(),
                     has_conflict: outcome.has_conflict,
                     conflict_kind: outcome.has_conflict.then(|| {
-                        if is_alive(b) { "content".into() } else { "add-add".into() }
+                        if is_alive(b) {
+                            "content".into()
+                        } else {
+                            "add-add".into()
+                        }
                     }),
-                    base_content: b.and_then(|s| s.version_id).and_then(|v| contents.get(&v).cloned()),
+                    base_content: b
+                        .and_then(|s| s.version_id)
+                        .and_then(|v| contents.get(&v).cloned()),
                     ours_content: Some(ours_txt),
                     theirs_content: Some(theirs_txt),
                     merged_content: Some(outcome.content),
@@ -335,15 +366,16 @@ struct MrDetailDto {
     blocked_reason: Option<String>,
 }
 
-async fn user_name(
-    db: &sea_orm::DatabaseConnection,
-    id: Uuid,
-) -> AppResult<String> {
+async fn user_name(db: &sea_orm::DatabaseConnection, id: Uuid) -> AppResult<String> {
     let u = user::Entity::find_by_id(id)
         .one(db)
         .await?
         .ok_or_else(|| AppError::Internal("user missing".into()))?;
-    Ok(if u.display_name.is_empty() { u.username } else { u.display_name })
+    Ok(if u.display_name.is_empty() {
+        u.username
+    } else {
+        u.display_name
+    })
 }
 
 // ---------- list ----------
@@ -362,8 +394,7 @@ async fn list_mrs(
     let proj = perm::get_project(&state.db, &slug).await?;
     perm::require_role(&state.db, &proj, cur.id, Role::Reader).await?;
 
-    let mut mq = merge_request::Entity::find()
-        .filter(merge_request::Column::ProjectId.eq(proj.id));
+    let mut mq = merge_request::Entity::find().filter(merge_request::Column::ProjectId.eq(proj.id));
     if let Some(s) = q.status.as_deref().filter(|s| !s.is_empty() && *s != "all") {
         mq = mq.filter(merge_request::Column::Status.eq(s));
     }
@@ -385,7 +416,10 @@ async fn list_mrs(
 
     let mut out = Vec::with_capacity(mrs.len());
     for m in mrs {
-        let source = bname.get(&m.source_branch_id).map(|b| b.name.clone()).unwrap_or_default();
+        let source = bname
+            .get(&m.source_branch_id)
+            .map(|b| b.name.clone())
+            .unwrap_or_default();
         let target_b = bname.get(&m.target_branch_id);
         let target = target_b.map(|b| b.name.clone()).unwrap_or_default();
         let conflict_files = m
@@ -437,9 +471,12 @@ async fn create_mr(
     }
 
     let source = vcs::resolve_branch(&state.db, &proj, Some(req.source.trim())).await?;
-    let target = vcs::resolve_branch(&state.db, &proj, req.target.as_deref().map(str::trim)).await?;
+    let target =
+        vcs::resolve_branch(&state.db, &proj, req.target.as_deref().map(str::trim)).await?;
     if source.id == target.id {
-        return Err(AppError::BadRequest("source and target branch are the same".into()));
+        return Err(AppError::BadRequest(
+            "source and target branch are the same".into(),
+        ));
     }
     if source.head_commit_id.is_none() {
         return Err(AppError::BadRequest("source branch is empty".into()));
@@ -544,8 +581,8 @@ async fn get_mr_detail(
     }
     reviews.sort_by(|a, b| a.created_at.cmp(&b.created_at));
 
-    let can_merge = role >= Role::Editor
-        && (!target.is_default || has_approval(&state.db, &proj, &m).await?);
+    let can_merge =
+        role >= Role::Editor && (!target.is_default || has_approval(&state.db, &proj, &m).await?);
     let blocked_reason = if m.status != "open" {
         None
     } else if !can_merge {
@@ -629,7 +666,11 @@ async fn add_review(
     }
     let action = match req.action.as_str() {
         "approve" | "reject" | "comment" => req.action.clone(),
-        _ => return Err(AppError::BadRequest("action must be approve|reject|comment".into())),
+        _ => {
+            return Err(AppError::BadRequest(
+                "action must be approve|reject|comment".into(),
+            ))
+        }
     };
     let comment = req
         .comment
@@ -673,7 +714,10 @@ async fn merge_mr(
     perm::require_role(&state.db, &proj, cur.id, Role::Editor).await?;
     let m = load_mr(&state.db, &proj, mr_id).await?;
     if m.status != "open" {
-        return Err(AppError::BadRequest(format!("merge request is {}", m.status)));
+        return Err(AppError::BadRequest(format!(
+            "merge request is {}",
+            m.status
+        )));
     }
     let source = load_branch(&state.db, &proj, m.source_branch_id).await?;
     let target = load_branch(&state.db, &proj, m.target_branch_id).await?;
@@ -716,13 +760,15 @@ async fn merge_mr(
             None
         } else {
             return Err(AppError::Conflict(format!(
-                "unresolved conflict in '{}': provide a resolution", p.path
+                "unresolved conflict in '{}': provide a resolution",
+                p.path
             )));
         };
         if let Some(txt) = &content {
             if txt.contains("<<<<<<< ours") || txt.contains(">>>>>>> theirs") {
                 return Err(AppError::BadRequest(format!(
-                    "resolution for '{}' still contains conflict markers", p.path
+                    "resolution for '{}' still contains conflict markers",
+                    p.path
                 )));
             }
         }
@@ -838,13 +884,20 @@ async fn close_mr(
     let role = perm::require_role(&state.db, &proj, cur.id, Role::Reader).await?;
     let m = load_mr(&state.db, &proj, mr_id).await?;
     if m.status != "open" {
-        return Err(AppError::BadRequest(format!("merge request is {}", m.status)));
+        return Err(AppError::BadRequest(format!(
+            "merge request is {}",
+            m.status
+        )));
     }
     if role < Role::Owner && m.created_by != cur.id {
-        return Err(AppError::Forbidden("only the author or an owner can close".into()));
+        return Err(AppError::Forbidden(
+            "only the author or an owner can close".into(),
+        ));
     }
     let mut am: merge_request::ActiveModel = m.into_active_model();
     am.status = Set("closed".into());
     let closed = am.update(&state.db).await?;
-    Ok(Json(serde_json::json!({ "id": closed.id, "status": closed.status })))
+    Ok(Json(
+        serde_json::json!({ "id": closed.id, "status": closed.status }),
+    ))
 }

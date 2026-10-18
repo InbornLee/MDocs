@@ -202,22 +202,6 @@ pub fn section_range(content: &str, selector: &str) -> Option<(usize, usize, Hea
     Some((heading.line, end.max(heading.line), heading))
 }
 
-/// 字节位置所在的最近标题（用于给搜索命中标注 anchor）。
-pub fn heading_at(content: &str, byte_pos: usize) -> Option<Heading> {
-    let end = {
-        let mut end = byte_pos.min(content.len());
-        while end > 0 && !content.is_char_boundary(end) {
-            end -= 1;
-        }
-        end
-    };
-    let line = content[..end].matches('\n').count() + 1;
-    outline(content)
-        .into_iter()
-        .filter(|h| h.line <= line)
-        .next_back()
-}
-
 /// 按字节上限截断，返回 `(截断后的文本, 是否截断)`；保证落在字符边界。
 pub fn truncate_bytes(content: &str, max_bytes: usize) -> (String, bool) {
     if content.len() <= max_bytes {

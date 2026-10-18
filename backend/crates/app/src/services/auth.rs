@@ -1,5 +1,5 @@
 use argon2::{
-    password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
+    password_hash::{phc::PasswordHash, PasswordHasher, PasswordVerifier},
     Argon2,
 };
 use axum::{
