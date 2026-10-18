@@ -1,5 +1,7 @@
 # MDocs
 
+[中文](README.md) · [English](README.en.md)
+
 > **单二进制、AI 原生的 Markdown 知识库** —— 像 Git 一样管理版本，像搜索引擎一样检索。
 
 MDocs 把散落的 Markdown 变成可协作、可追溯、可被 AI 直接使用的知识库：
