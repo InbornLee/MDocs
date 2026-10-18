@@ -119,7 +119,8 @@ MDocs 的检索不是“把全文丢进 LIKE”，而是为 AI 使用场景设�
 2. 设置密钥并启动：
 
    ```bash
-   export APP_JWT__SECRET="$(openssl rand -hex 32)"
+   cp .env.example .env
+   # 编辑 .env，至少设置 APP_JWT__SECRET（生成方式：openssl rand -hex 32）
    docker compose up -d --build
    ```
 
