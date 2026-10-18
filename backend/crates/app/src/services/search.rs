@@ -70,7 +70,7 @@ fn lower_char(c: char) -> char {
 
 /// 大小写不敏感查找，返回命中的字节范围。
 /// 逐字符比较：整串 `to_lowercase()` 会改变长度，用它定位会与原文错位。
-fn find_ci(haystack: &str, needle: &[char], from: usize) -> Option<(usize, usize)> {
+pub(crate) fn find_ci(haystack: &str, needle: &[char], from: usize) -> Option<(usize, usize)> {
     if needle.is_empty() {
         return None;
     }
@@ -93,6 +93,64 @@ fn find_ci(haystack: &str, needle: &[char], from: usize) -> Option<(usize, usize
         }
     }
     None
+}
+
+/// 命中统计：总次数与首次命中的字节位置。
+pub struct MatchStats {
+    pub occurrences: usize,
+    pub first_pos: Option<usize>,
+}
+
+/// 统计 `term` 在 `content` 中的出现次数与首次位置。
+pub fn count_matches(content: &str, term: &str) -> MatchStats {
+    let needle: Vec<char> = term.chars().map(lower_char).collect();
+    if needle.is_empty() {
+        return MatchStats {
+            occurrences: 0,
+            first_pos: None,
+        };
+    }
+    let mut count = 0usize;
+    let mut first = None;
+    let mut from = 0usize;
+    while let Some((start, end)) = find_ci(content, &needle, from) {
+        if first.is_none() {
+            first = Some(start);
+        }
+        count += 1;
+        from = end.max(start + 1);
+    }
+    MatchStats {
+        occurrences: count,
+        first_pos: first,
+    }
+}
+
+/// 用已经算好的命中统计计算相关度，避免同一次检索重复扫描正文。
+pub fn relevance_with_stats(
+    title: &str,
+    path: &str,
+    content: &str,
+    term: &str,
+    stats: &MatchStats,
+) -> f64 {
+    let needle = term.to_lowercase();
+    if needle.trim().is_empty() {
+        return 0.0;
+    }
+    let mut score = 0.0;
+    if title.to_lowercase().contains(&needle) {
+        score += 12.0;
+    }
+    if path.to_lowercase().contains(&needle) {
+        score += 6.0;
+    }
+    score += (stats.occurrences.min(10) as f64) * 1.2;
+    if let Some(pos) = stats.first_pos {
+        let len = content.len().max(1) as f64;
+        score += (1.0 - (pos as f64 / len)).clamp(0.0, 1.0) * 2.0;
+    }
+    score
 }
 
 /// 命中处前后各取 `radius` 个字符作为片段（换行折成空格）

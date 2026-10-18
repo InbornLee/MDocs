@@ -8,6 +8,7 @@ import {
   NFormItem,
   NInput,
   NMenu,
+  NSelect,
   NUpload,
   useDialog,
   useMessage,
@@ -113,11 +114,21 @@ interface TokenItem {
   prefix: string
   created_at: string
   last_used_at: string | null
+  /** 过期时间；null 表示永不过期 */
+  expires_at: string | null
 }
 
 const tokens = ref<TokenItem[]>([])
 const tokenName = ref('')
 const creatingToken = ref(false)
+/** 新建 token 的有效期（天），0 = 永不过期 */
+const tokenExpires = ref(0)
+const expireOptions = [
+  { label: '永不过期', value: 0 },
+  { label: '7 天', value: 7 },
+  { label: '30 天', value: 30 },
+  { label: '90 天', value: 90 },
+]
 /** 新建出来的明文 token，只在这里显示一次 */
 const newToken = ref('')
 const tokensLoading = ref(false)
@@ -189,7 +200,10 @@ async function loadTokens() {
 async function createToken() {
   creatingToken.value = true
   try {
-    const res = await api.post<{ token: string }>('/api/me/tokens', { name: tokenName.value })
+    const res = await api.post<{ token: string }>('/api/me/tokens', {
+      name: tokenName.value,
+      expires_in_days: tokenExpires.value || null,
+    })
     newToken.value = res.token
     tokenName.value = ''
     await loadTokens()
@@ -343,6 +357,7 @@ onMounted(loadTokens)
               <code class="mono">Authorization: Bearer &lt;token&gt;</code>，即可访问你参与的项目（含私有项目与未发布文档）；
               不带 token 只能看到公开项目与已发布文档。MCP 地址：
               <code class="mono">{{ mcpUrl }}</code>
+              。token 可设置有效期；服务端默认按 token / IP 限流（每分钟），并在审计表中记录每次 MCP 工具调用。
             </p>
 
             <div class="row" style="gap: 8px; margin-bottom: 14px">
@@ -352,6 +367,12 @@ onMounted(loadTokens)
                 placeholder="名称，如 Claude Desktop"
                 style="max-width: 260px"
                 @keyup.enter="createToken"
+              />
+              <n-select
+                v-model:value="tokenExpires"
+                size="small"
+                :options="expireOptions"
+                style="width: 120px"
               />
               <n-button size="small" type="primary" :loading="creatingToken" @click="createToken">
                 生成 token
@@ -381,6 +402,8 @@ onMounted(loadTokens)
                   <div class="muted" style="font-size: 12px">
                     <code class="mono">{{ t.prefix }}…</code> · 创建于 {{ fmt(t.created_at) }}
                     <template v-if="t.last_used_at"> · 最近使用 {{ fmt(t.last_used_at) }}</template>
+                    <template v-if="t.expires_at"> · 过期于 {{ fmt(t.expires_at) }}</template>
+                    <template v-else> · 永不过期</template>
                   </div>
                 </div>
                 <n-button size="tiny" type="error" ghost @click="revokeToken(t)">删除</n-button>
@@ -401,6 +424,15 @@ onMounted(loadTokens)
               <template v-if="!newToken">
                 token 请替换成上面「API token」里新生成的那串（只在创建时显示一次，之后只保留前缀）。
               </template>
+            </p>
+            <p class="muted" style="font-size: 12px; margin: 0 0 12px; line-height: 1.7">
+              工具：<code class="mono">list_projects</code> · <code class="mono">list_branches</code> ·
+              <code class="mono">list_documents</code> · <code class="mono">get_document_outline</code> ·
+              <code class="mono">read_document</code>（可按 section / 行区间读取）·
+              <code class="mono">search_documents</code>（带 score / anchor / 跨项目）·
+              <code class="mono">get_link_graph</code>；另外提供
+              <code class="mono">mdocs://{project}/{path}</code> 资源与
+              <code class="mono">answer_with_citations</code> 提示词。
             </p>
 
             <div class="row-between" style="margin-bottom: 6px">

@@ -185,6 +185,7 @@ struct TokenDto {
     prefix: String,
     created_at: DateTime<Utc>,
     last_used_at: Option<DateTime<Utc>>,
+    expires_at: Option<DateTime<Utc>>,
 }
 
 impl From<api_token::Model> for TokenDto {
@@ -195,6 +196,7 @@ impl From<api_token::Model> for TokenDto {
             prefix: m.token_prefix,
             created_at: m.created_at,
             last_used_at: m.last_used_at,
+            expires_at: m.expires_at,
         }
     }
 }
@@ -210,6 +212,8 @@ async fn list_tokens(
 #[derive(Deserialize)]
 pub struct CreateTokenReq {
     pub name: Option<String>,
+    /// 有效天数；不传或 <= 0 表示永不过期
+    pub expires_in_days: Option<i64>,
 }
 
 async fn create_token(
@@ -227,12 +231,13 @@ async fn create_token(
         return Err(AppError::BadRequest("name too long".into()));
     }
 
-    let (token, model) = tokens::create(&state.db, cur.id, &name).await?;
+    let (token, model) = tokens::create(&state.db, cur.id, &name, req.expires_in_days).await?;
     Ok(Json(serde_json::json!({
         "id": model.id,
         "name": model.name,
         "token": token,
         "created_at": model.created_at,
+        "expires_at": model.expires_at,
     })))
 }
 

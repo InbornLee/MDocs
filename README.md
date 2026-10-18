@@ -6,6 +6,9 @@ MDocs 把散落的 Markdown 文档变成可协作、可追溯的知识库：像 
 
 前后端全部由**单个 Rust 二进制**提供（SPA 通过 `rust-embed` 内嵌），一次构建、单容器部署。
 
+当前版本 **0.1.1**（P0 AI 知识库改进）。评估结论、改进路线与 pgvector 决策见
+[docs/AI-KNOWLEDGE-BASE.md](docs/AI-KNOWLEDGE-BASE.md)。
+
 ---
 
 ## 功能特性
@@ -17,7 +20,7 @@ MDocs 把散落的 Markdown 文档变成可协作、可追溯的知识库：像 
 - **自动链接树**：解析标准相对链接 `[text](./path/doc.md)` 与 Obsidian 风格 `[[wiki]]` / `[[name|显示名]]`，用 ECharts 力导向图展示文档关系，悬空链接以红色虚线标识。
 - **导入导出**：支持 `.zip` 文档库、单个 `.md`、tree JSON 导入；导出为 zip / tree JSON / 单文档下载。兼容中文（含 GBK 文件名）压缩包。
 - **公开站点与发布**：项目可设为公开、文档可单独发布，未登录访客可浏览公开内容，支持自定义站点信息。
-- **AI 知识库（MCP）**：内置 MCP Streamable HTTP 端点，AI 客户端可直接检索文档、读取全文、获取链接图谱；支持用 API Token 访问私有项目。
+- **AI 知识库（MCP）**：内置 MCP Streamable HTTP 端点，AI 客户端可检索文档（相关度排序 + 引用定位）、按标题分节精读、浏览分支与链接图谱；支持用 API Token 访问私有项目，带限流与调用审计。
 - **多数据库**：默认 SQLite，开箱即用；也支持 PostgreSQL。
 - **国内源构建**：Docker 构建默认走 apt / npm / crates.io 国内镜像，可按需覆盖。
 
@@ -102,6 +105,10 @@ cd ../backend && cargo build --release -p app   # 产物：target/release/mdocs
 | `APP_JWT__SECRET` | 随机临时值 | JWT 签名密钥；未设置时每次重启会使会话失效 |
 | `APP_UPLOAD__MAX_AVATAR_MB` | `5` | 头像上传大小上限（MB） |
 | `APP_MCP__ALLOWED_HOSTS` | 空 | MCP 端点额外允许的 Host（逗号分隔，容器 / 反向代理场景需要） |
+| `APP_MCP__MAX_CONTENT_BYTES` | `65536` | `read_document` 单次返回的字节上限（超出截断并标记 `truncated`） |
+| `APP_MCP__RATE_LIMIT_PER_MIN` | `240` | `/mcp` 每分钟请求上限（按 token / IP），`0` 关闭 |
+| `APP_MCP__SNAPSHOT_CACHE` | `8` | 分支快照缓存保留的 head 数量 |
+| `APP_PUBLIC_BASE_URL` | 空 | 对外站点地址，设置后 MCP 返回绝对阅读链接 |
 | `RUST_LOG` | `info` | 日志级别 |
 
 Docker 构建参数（默认已指向国内镜像，传空字符串可回退上游）：
@@ -122,13 +129,21 @@ MCP 端点与 REST API **同端口**，路径为 `/mcp`（Streamable HTTP）。
 
 | 工具 | 说明 |
 | --- | --- |
-| `list_projects` | 列出文档项目（默认仅公开项目） |
-| `list_documents` | 列出某项目下的文档路径、标题与大小 |
-| `read_document` | 读取指定文档的完整 Markdown 内容 |
-| `search_documents` | 按关键词搜索并返回命中片段 |
+| `list_projects` | 列出文档项目（默认仅公开项目），含默认分支与文档数 |
+| `list_branches` | 列出项目分支（读取非默认版本时使用） |
+| `list_documents` | 列出文档路径、标题、大小与阅读链接 |
+| `get_document_outline` | 返回标题树（level / title / anchor / 行号） |
+| `read_document` | 读取全文，或按 `section` / `offset`+`limit` 只读片段；返回 `total_bytes` / `truncated` |
+| `search_documents` | 关键词检索，按相关度排序，返回 `score`、`anchor`、`url`、`commit_id`，支持跨项目与 `offset` |
 | `get_link_graph` | 返回项目内文档间的有向链接图谱 |
 
-- 默认只能访问**公开项目**；在「设置 → API Token」生成令牌后，通过 `Authorization: Bearer <token>` 可访问自己作为成员的项目。
+此外提供：
+
+- **Resources**：`mdocs://{project}/{path}`（含资源模板），客户端可直接按 URI 拉取文档；
+- **Prompt**：`answer_with_citations`，引导模型先检索、按节精读、回答时附文档链接与锚点。
+
+- 默认只能访问**公开项目**；在「设置 → API Token」生成令牌（可设置有效期）后，通过 `Authorization: Bearer <token>` 可访问自己作为成员的项目。
+- 服务端按 token / IP 做分钟级限流，并把每次工具调用写入 `mcp_audit_log`。
 - 客户端配置示例（以支持 Streamable HTTP 的 MCP 客户端为例）：
 
   ```json
@@ -186,6 +201,7 @@ mdocs-main/
 │   │   └── views/                 # 首页 / 登录注册 / 项目工作台 / 公开站点 / 管理后台
 │   └── vite.config.ts             # 开发代理 → 8097，构建输出 → backend/.../frontend-dist
 ├── docker-compose.yml
+├── docs/                          # 评估与改进路线（AI-KNOWLEDGE-BASE.md）
 └── README.md
 ```
 

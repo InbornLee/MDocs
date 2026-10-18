@@ -12,6 +12,14 @@ pub struct Config {
     pub max_avatar_mb: usize,
     /// extra `Host` authorities accepted by the MCP endpoint
     pub mcp_allowed_hosts: Vec<String>,
+    /// read_document 单次返回的字节上限（超出截断并标记 truncated）
+    pub mcp_max_content_bytes: usize,
+    /// /mcp 每分钟请求上限；0 表示关闭
+    pub mcp_rate_limit_per_min: u32,
+    /// 分支快照缓存保留的 head 数量
+    pub snapshot_cache_size: usize,
+    /// 对外站点基地址（用于 MCP 返回绝对链接），如 https://docs.example.com
+    pub public_base_url: Option<String>,
 }
 
 impl Config {
@@ -46,6 +54,13 @@ impl Config {
                 .unwrap_or(5),
             data_dir,
             mcp_allowed_hosts,
+            mcp_max_content_bytes: env_usize("APP_MCP__MAX_CONTENT_BYTES", 64 * 1024),
+            mcp_rate_limit_per_min: env_usize("APP_MCP__RATE_LIMIT_PER_MIN", 240) as u32,
+            snapshot_cache_size: env_usize("APP_MCP__SNAPSHOT_CACHE", 8),
+            public_base_url: env::var("APP_PUBLIC_BASE_URL")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
         }
     }
 
@@ -87,4 +102,11 @@ impl Config {
     pub fn attachments_dir(&self) -> PathBuf {
         self.uploads_dir().join("attachments")
     }
+}
+
+fn env_usize(key: &str, default: usize) -> usize {
+    env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
 }

@@ -28,3 +28,11 @@ backend/crates/app/frontend-dist
 **/smoke-*.ps1
 backend/merge-test.txt
 backend/mcp-check.txt
+
+# local deployment assets (deploy/.env holds secrets, never send to a builder)
+deploy/
+
+# repository docs / samples / editor config are not part of the image
+docs/
+doc-test/
+.trae/

@@ -29,3 +29,6 @@ Thumbs.db
 
 # ---- browser automation artifacts ----
 .playwright-mcp/
+
+# ---- deployment artifacts stay local, never pushed to the remote ----
+deploy/

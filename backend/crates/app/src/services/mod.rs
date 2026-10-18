@@ -1,11 +1,15 @@
 pub mod api_token;
 pub mod attachment;
+pub mod audit;
 pub mod auth;
 pub mod avatar;
 pub mod diff;
+pub mod heading;
 pub mod links;
 pub mod merge;
 pub mod perm;
+pub mod rate_limit;
 pub mod search;
 pub mod site;
+pub mod snapshot;
 pub mod vcs;

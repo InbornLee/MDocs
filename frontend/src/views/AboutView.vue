@@ -3,9 +3,13 @@ import { computed, onMounted, ref } from 'vue'
 // 作者与版本直接取 package.json，避免两处维护
 import pkg from '../../package.json'
 import { getSiteSettings } from '@/api/public'
+import { changelog } from '@/content/changelog'
 
 const author = pkg.author
 const version = pkg.version
+/** 第一条即当前版本；其余在「历史版本」里折叠展示 */
+const latest = changelog[0]
+const history = changelog.slice(1)
 
 // 仓库地址与反馈入口由管理员在后台配置（站点设置），未配置就整块不显示
 const repoUrl = ref('')
@@ -92,6 +96,45 @@ const features = [
     </section>
 
     <section class="card-surface about-card">
+      <div class="about-card-head">
+        <div class="section-title">版本更新</div>
+        <span class="muted about-card-note">最新 v{{ latest.version }}</span>
+      </div>
+
+      <article class="release">
+        <header class="release-head">
+          <span class="release-version mono">v{{ latest.version }}</span>
+          <span class="release-badge">当前</span>
+          <span class="muted release-date">{{ latest.date }}</span>
+        </header>
+        <p class="release-title">{{ latest.title }}</p>
+        <div v-for="g in latest.groups" :key="g.kind" class="change-group">
+          <span class="change-kind" :class="`kind-${g.kind}`">{{ g.label }}</span>
+          <ul class="change-list">
+            <li v-for="item in g.items" :key="item">{{ item }}</li>
+          </ul>
+        </div>
+      </article>
+
+      <details v-if="history.length" class="release-history">
+        <summary>历史版本（{{ history.map((r) => 'v' + r.version).join('、') }}）</summary>
+        <article v-for="r in history" :key="r.version" class="release">
+          <header class="release-head">
+            <span class="release-version mono">v{{ r.version }}</span>
+            <span class="muted release-date">{{ r.date }}</span>
+          </header>
+          <p class="release-title">{{ r.title }}</p>
+          <div v-for="g in r.groups" :key="g.kind" class="change-group">
+            <span class="change-kind" :class="`kind-${g.kind}`">{{ g.label }}</span>
+            <ul class="change-list">
+              <li v-for="item in g.items" :key="item">{{ item }}</li>
+            </ul>
+          </div>
+        </article>
+      </details>
+    </section>
+
+    <section class="card-surface about-card">
       <div class="section-title">主要功能</div>
       <ul class="about-list">
         <li v-for="f in features" :key="f">{{ f }}</li>
@@ -166,6 +209,113 @@ const features = [
 .about-card {
   padding: 16px 18px;
   margin-bottom: 16px;
+}
+.about-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.about-card-note {
+  font-size: 12px;
+}
+.release {
+  padding: 10px 0;
+  border-top: 1px solid var(--rule-soft);
+}
+.release:first-of-type {
+  padding-top: 0;
+  border-top: 0;
+}
+.release-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.release-version {
+  font-size: 15px;
+  font-weight: 600;
+}
+.release-badge {
+  padding: 0 7px;
+  border: 1px solid var(--rule-soft);
+  border-radius: 999px;
+  background: var(--brand-soft);
+  color: var(--brand);
+  font-size: 11px;
+  line-height: 18px;
+}
+.release-date {
+  margin-left: auto;
+  font-size: 12px;
+}
+.release-title {
+  margin: 5px 0 8px;
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.change-group {
+  display: flex;
+  gap: 10px;
+  padding: 4px 0;
+}
+.change-kind {
+  flex: none;
+  width: 46px;
+  height: 20px;
+  border: 1px solid var(--rule-soft);
+  border-radius: 4px;
+  background: var(--bg-soft);
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 18px;
+  text-align: center;
+}
+.kind-added {
+  color: #1a7f37;
+  border-color: color-mix(in srgb, #1a7f37 35%, transparent);
+}
+.kind-improved {
+  color: var(--brand);
+  border-color: color-mix(in srgb, var(--brand) 35%, transparent);
+}
+.kind-fixed {
+  color: #bc4c00;
+  border-color: color-mix(in srgb, #bc4c00 35%, transparent);
+}
+.kind-security {
+  color: #cf222e;
+  border-color: color-mix(in srgb, #cf222e 35%, transparent);
+}
+:global(html.dark) .kind-added {
+  color: #3fb950;
+}
+:global(html.dark) .kind-fixed {
+  color: #f0883e;
+}
+:global(html.dark) .kind-security {
+  color: #ff7b72;
+}
+.change-list {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 13px;
+  line-height: 1.8;
+}
+.change-list li {
+  margin: 0;
+}
+.release-history {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--rule-soft);
+}
+.release-history summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12.5px;
 }
 .about-list {
   margin: 0;

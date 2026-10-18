@@ -37,7 +37,8 @@ services:
       # Signs the JWT session tokens. Provide a strong value via the shell
       # (`docker compose up` picks up .env automatically) or export
       # APP_JWT__SECRET before starting. Changing it invalidates sessions.
-      APP_JWT__SECRET: ${APP_JWT__SECRET:-please-change-me-to-a-long-random-string}
+      # 必填：`export APP_JWT__SECRET=$(openssl rand -hex 32)` 或写进 .env
+      APP_JWT__SECRET: ${APP_JWT__SECRET:?APP_JWT__SECRET must be set}
       # External PostgreSQL on the host (see the note at the top).
       APP_DATABASE__URL: "postgresql://mdoc:mdoc@host.docker.internal:5432/mdoc"
       # Extra Host authorities accepted by the /mcp endpoint (comma separated).

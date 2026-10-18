@@ -7,9 +7,12 @@ mod services;
 mod state;
 mod static_files;
 
+use std::sync::Arc;
+
 use axum::{
+    extract::State,
     routing::get,
-    Router,
+    Json, Router,
 };
 use migration::MigratorTrait;
 use sea_orm::{ConnectionTrait, Database};
@@ -19,15 +22,40 @@ use tower_http::{
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
+use crate::services::{rate_limit::RateLimiter, snapshot::SnapshotCache};
 use crate::state::AppState;
 
 async fn health() -> &'static str {
     "ok"
 }
 
+async fn version(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "name": "mdocs",
+        "version": env!("CARGO_PKG_VERSION"),
+        "mcp": {
+            "transport": "streamable-http",
+            "path": "/mcp",
+            "tools": [
+                "list_projects",
+                "list_branches",
+                "list_documents",
+                "get_document_outline",
+                "read_document",
+                "search_documents",
+                "get_link_graph"
+            ],
+            "resources": true,
+            "prompts": ["answer_with_citations"],
+            "rate_limit_per_min": state.cfg.mcp_rate_limit_per_min,
+        }
+    }))
+}
+
 fn build_router(state: AppState) -> Router {
     let public = Router::new()
         .route("/api/health", get(health))
+        .route("/api/version", get(version))
         .merge(routes::auth::public_routes())
         .merge(routes::user::public_routes())
         .merge(routes::transfer::public_routes())
@@ -50,7 +78,14 @@ fn build_router(state: AppState) -> Router {
         .merge(public)
         .merge(authenticated)
         // MCP (Model Context Protocol) endpoint for AI knowledge-base access
-        .nest_service("/mcp", mcp::service(state.clone()))
+        .merge(
+            Router::new()
+                .nest_service("/mcp", mcp::service(state.clone()))
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    services::rate_limit::middleware,
+                )),
+        )
         .fallback(static_files::static_handler)
         .layer(CorsLayer::permissive())
         .layer(
@@ -90,8 +125,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     services::auth::seed_admin(&db).await?;
 
     let state = AppState {
+        snapshots: Arc::new(SnapshotCache::new(cfg.snapshot_cache_size)),
+        rate_limiter: Arc::new(RateLimiter::new(cfg.mcp_rate_limit_per_min)),
         db,
-        cfg: std::sync::Arc::new(cfg),
+        cfg: Arc::new(cfg),
     };
     let listen = state.cfg.listen.clone();
     let app = build_router(state);

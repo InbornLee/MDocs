@@ -22,16 +22,33 @@ fn hash(token: &str) -> String {
     vcs::sha256_hex(token)
 }
 
+/// 供页面 / 审计辨认的 token 前缀（与 `create` 写入的 `token_prefix` 一致）。
+pub fn display_prefix(token: &str) -> String {
+    let body = token.trim().strip_prefix(TOKEN_PREFIX).unwrap_or(token.trim());
+    format!(
+        "{TOKEN_PREFIX}{}",
+        body.chars().take(DISPLAY_CHARS).collect::<String>()
+    )
+}
+
 /// 新建一条 token，返回（明文、记录）。明文此后不再可得。
+///
+/// `expires_in_days` 为 `None` 或 `<= 0` 表示永不过期。
 pub async fn create(
     db: &impl ConnectionTrait,
     user_id: Uuid,
     name: &str,
+    expires_in_days: Option<i64>,
 ) -> AppResult<(String, api_token::Model)> {
     let mut buf = [0u8; SECRET_BYTES];
     rand::rng().fill_bytes(&mut buf);
     let secret: String = buf.iter().map(|b| format!("{b:02x}")).collect();
     let token = format!("{TOKEN_PREFIX}{secret}");
+
+    let now = Utc::now();
+    let expires_at = expires_in_days
+        .filter(|d| *d > 0)
+        .map(|d| now + chrono::Duration::days(d));
 
     let model = api_token::ActiveModel {
         id: Set(Uuid::now_v7()),
@@ -39,8 +56,9 @@ pub async fn create(
         name: Set(name.to_string()),
         token_hash: Set(hash(&token)),
         token_prefix: Set(format!("{TOKEN_PREFIX}{}", &secret[..DISPLAY_CHARS])),
-        created_at: Set(Utc::now()),
+        created_at: Set(now),
         last_used_at: Set(None),
+        expires_at: Set(expires_at),
     }
     .insert(db)
     .await?;
@@ -62,6 +80,14 @@ pub async fn resolve(db: &sea_orm::DatabaseConnection, token: &str) -> AppResult
     };
 
     let user_id = row.user_id;
+    // 过期 token 与不存在同样处理，但给出明确原因，方便客户端排查。
+    if let Some(exp) = row.expires_at {
+        if exp <= Utc::now() {
+            return Err(AppError::Unauthorized(
+                "API token expired, create a new one in Settings → API token".into(),
+            ));
+        }
+    }
     let mut am: api_token::ActiveModel = row.into();
     am.last_used_at = Set(Some(Utc::now()));
     if let Err(e) = am.update(db).await {

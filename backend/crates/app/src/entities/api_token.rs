@@ -13,6 +13,8 @@ pub struct Model {
     pub token_prefix: String,
     pub created_at: DateTimeUtc,
     pub last_used_at: Option<DateTimeUtc>,
+    /// 过期时间；`None` 表示永不过期
+    pub expires_at: Option<DateTimeUtc>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

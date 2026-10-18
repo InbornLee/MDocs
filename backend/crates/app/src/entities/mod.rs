@@ -10,4 +10,5 @@ pub mod link_edge;
 pub mod merge_request;
 pub mod mr_review;
 pub mod api_token;
+pub mod mcp_audit;
 pub mod setting;
