@@ -36,3 +36,6 @@ deploy/
 
 # ---- local test docs / samples (not part of the repository) ----
 doc-test/
+
+# ---- editor / agent artifacts ----
+.trae/
