@@ -17,6 +17,7 @@ use axum::{
 use migration::MigratorTrait;
 use sea_orm::{ConnectionTrait, Database};
 use tower_http::{
+    compression::CompressionLayer,
     cors::CorsLayer,
     trace::{DefaultMakeSpan, TraceLayer},
 };
@@ -92,6 +93,8 @@ fn build_router(state: AppState) -> Router {
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::default().include_headers(true)),
         )
+        // SSE 由 tower-http 默认排除，不会破坏 MCP 的流式响应
+        .layer(CompressionLayer::new())
         .with_state(state)
 }
 
@@ -135,6 +138,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     tracing::info!("mdocs listening on http://{}", listen);
-    axum::serve(listener, app).await?;
+    // ConnectInfo 让 MCP 审计 / 限流能拿到真实客户端 IP（反代未传 X-Forwarded-For 时兜底）
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

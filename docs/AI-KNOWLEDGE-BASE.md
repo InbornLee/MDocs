@@ -75,7 +75,7 @@ MDocs 已经是一个**可直接接入 AI 客户端的文档知识库**：MCP St
 - 大文档可按 section 读取，响应体不超过配置上限并显式标记 `truncated`；
 - 过期 token 返回明确错误；超过速率上限返回 429；每次工具调用在审计表留痕。
 
-### 0.2.0 — P1（下一步）
+### 0.1.2 — P1（下一步）
 
 - 倒排索引：SQLite FTS5（trigram，中文友好）/ PostgreSQL `tsvector + pg_trgm`，增量维护在 commit 钩子
 - Chunk 级索引与检索（按 heading 切块，保留代码块/表格）
@@ -85,7 +85,7 @@ MDocs 已经是一个**可直接接入 AI 客户端的文档知识库**：MCP St
 - 附件：MCP 返回引用附件清单与可访问 URL，图片可做 OCR/描述
 - 鉴权：OAuth 2.1 / 动态客户端注册，token scope
 
-### 0.3.0 — P2
+### 0.1.3 — P2
 
 - 内置 `ask`（带引用、可拒答）
 - 知识质量：死链、孤立文档、语义重复/冲突检测
@@ -157,3 +157,12 @@ chunk 表（跨后端统一）:
   - `read_document(section="安装步骤")` 只返回该节（13-20 行），front matter 不再被当成标题；
   - 过期 token 返回 `API token expired`；限流设为 2/分钟时第 3 次请求返回 429；
   - `mcp_audit_log` 中可查到 `list_projects` / `search_documents` / `read_resource` 等记录。
+
+### 后续修复（0.1.1 补丁）
+
+- 审计改为在 `call_tool` 统一记录：成功 `ok=true`，失败 `ok=false` 并写入错误消息；
+  工具 panic 时由 `Drop` 兜底记录。
+- 审计 / 限流的客户端 IP 在缺少 `X-Forwarded-For` 时回退到 `ConnectInfo`（TCP 对端），
+  直连部署也能记录真实来源。
+- 全局启用 gzip 压缩（`tower-http::CompressionLayer`）；SSE（`text/event-stream`）
+  由默认谓词自动排除，不影响 MCP 流式响应。

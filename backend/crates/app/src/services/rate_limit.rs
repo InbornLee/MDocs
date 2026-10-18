@@ -93,6 +93,12 @@ fn client_ip(req: &Request) -> String {
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.trim().to_string())
         })
+        // 没有反向代理头时用 TCP 连接信息兜底
+        .or_else(|| {
+            req.extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|ci| ci.0.ip().to_string())
+        })
         .unwrap_or_else(|| "unknown".to_string())
 }
 

@@ -12,17 +12,18 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use axum::http::request::Parts;
+use axum::{extract::ConnectInfo, http::request::Parts};
 use rmcp::{
     handler::server::{
-        tool::{Extension, ToolRouter},
+        tool::{Extension, ToolCallContext, ToolRouter},
         wrapper::Parameters,
     },
     model::{
-        CallToolResult, ContentBlock, GetPromptRequestParams, GetPromptResponse, ListPromptsResult,
-        ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams, Prompt,
-        PromptArgument, PromptMessage, ReadResourceRequestParams, ReadResourceResponse,
-        ReadResourceResult, Resource, ResourceContents, ResourceTemplate, Role,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+        GetPromptRequestParams, GetPromptResponse, ListPromptsResult, ListResourceTemplatesResult,
+        ListResourcesResult, PaginatedRequestParams, Prompt, PromptArgument, PromptMessage,
+        ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
+        ResourceContents, ResourceTemplate, Role,
     },
     service::RequestContext,
     tool, tool_handler, tool_router, ErrorData as McpError, RoleServer,
@@ -300,6 +301,13 @@ struct CallerInfo {
     client_ip: Option<String>,
 }
 
+/// `call_tool` 统一完成鉴权后放进请求扩展，工具只消费结果，避免重复查 token。
+#[derive(Clone, Debug)]
+struct ResolvedCaller {
+    caller: Caller,
+    info: CallerInfo,
+}
+
 fn client_ip(parts: &Parts) -> Option<String> {
     parts
         .headers
@@ -314,6 +322,13 @@ fn client_ip(parts: &Parts) -> Option<String> {
                 .get("x-real-ip")
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.trim().to_string())
+        })
+        // 直连（没有反向代理头）时用 TCP 连接信息兜底
+        .or_else(|| {
+            parts
+                .extensions
+                .get::<ConnectInfo<std::net::SocketAddr>>()
+                .map(|ci| ci.0.ip().to_string())
         })
 }
 
@@ -541,6 +556,114 @@ fn audit_call(
     );
 }
 
+/// 一次工具调用的审计记录。
+///
+/// `call_tool` 在调用前后各执行一次：`finish` 写入真实结果；如果实现 panic
+/// 或提前返回，`Drop` 兜底写一条失败记录，保证不会静默丢失。
+struct ToolAudit<'a> {
+    state: &'a AppState,
+    info: CallerInfo,
+    tool: String,
+    project: Option<String>,
+    detail: Option<String>,
+    written: bool,
+}
+
+impl<'a> ToolAudit<'a> {
+    fn new(
+        state: &'a AppState,
+        info: CallerInfo,
+        tool: impl Into<String>,
+        project: Option<String>,
+        detail: Option<String>,
+    ) -> Self {
+        Self {
+            state,
+            info,
+            tool: tool.into(),
+            project,
+            detail,
+            written: false,
+        }
+    }
+
+    fn write(&mut self, ok: bool, error: Option<String>) {
+        if self.written {
+            return;
+        }
+        self.written = true;
+        audit::record(
+            self.state,
+            audit::AuditEntry {
+                user_id: self.info.user_id,
+                token_prefix: self.info.token_prefix.clone(),
+                client_ip: self.info.client_ip.clone(),
+                tool: self.tool.clone(),
+                project: self.project.clone(),
+                detail: self.detail.clone(),
+                ok,
+                error,
+            },
+        );
+    }
+
+    fn finish<T>(mut self, result: &Result<T, McpError>) {
+        match result {
+            Ok(_) => self.write(true, None),
+            Err(e) => self.write(false, Some(e.message.to_string())),
+        }
+    }
+}
+
+impl Drop for ToolAudit<'_> {
+    fn drop(&mut self) {
+        if !self.written {
+            let panicking = std::thread::panicking();
+            self.write(!panicking, panicking.then(|| "tool panicked".to_string()));
+        }
+    }
+}
+
+/// 从工具参数里提取项目 slug（跨项目检索时取前几个）。
+fn audit_project(args: &Option<serde_json::Map<String, serde_json::Value>>) -> Option<String> {
+    let a = args.as_ref()?;
+    if let Some(p) = a.get("project").and_then(|v| v.as_str()) {
+        if !p.trim().is_empty() {
+            return Some(p.to_string());
+        }
+    }
+    a.get("projects")
+        .and_then(|v| v.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|v| v.as_str())
+                .take(10)
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .filter(|s| !s.is_empty())
+}
+
+/// 从工具参数里提取一小段可读摘要，不落文档正文。
+fn audit_detail(args: &Option<serde_json::Map<String, serde_json::Value>>) -> Option<String> {
+    let a = args.as_ref()?;
+    let mut out = Vec::new();
+    for key in [
+        "query", "path", "section", "doc_id", "branch", "offset", "limit",
+    ] {
+        match a.get(key) {
+            Some(serde_json::Value::String(s)) if !s.is_empty() => out.push(format!("{key}={s}")),
+            Some(serde_json::Value::Number(n)) => out.push(format!("{key}={n}")),
+            _ => {}
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out.join(" "))
+    }
+}
+
 fn ts(t: chrono::DateTime<chrono::Utc>) -> String {
     t.to_rfc3339()
 }
@@ -586,16 +709,9 @@ impl DocsServer {
     async fn list_projects(
         &self,
         Parameters(args): Parameters<ListProjectsArgs>,
-        Extension(parts): Extension<Parts>,
+        Extension(resolved): Extension<ResolvedCaller>,
     ) -> Result<CallToolResult, McpError> {
-        let (caller, info) = caller(&self.state, &parts).await?;
-        audit_call(
-            &self.state,
-            &info,
-            "list_projects",
-            None,
-            args.query.clone(),
-        );
+        let caller = resolved.caller;
         let page = args.page.unwrap_or(1).max(1);
         let page_size = args.page_size.unwrap_or(20).clamp(1, 50);
 
@@ -707,16 +823,9 @@ impl DocsServer {
     async fn list_branches(
         &self,
         Parameters(args): Parameters<ProjectArgs>,
-        Extension(parts): Extension<Parts>,
+        Extension(resolved): Extension<ResolvedCaller>,
     ) -> Result<CallToolResult, McpError> {
-        let (caller, info) = caller(&self.state, &parts).await?;
-        audit_call(
-            &self.state,
-            &info,
-            "list_branches",
-            Some(args.project.clone()),
-            None,
-        );
+        let caller = resolved.caller;
         let sc = scope(&self.state, &args.project, args.branch.as_deref(), caller).await?;
         let rows = branch::Entity::find()
             .filter(branch::Column::ProjectId.eq(sc.proj.id))
@@ -759,16 +868,9 @@ impl DocsServer {
     async fn list_documents(
         &self,
         Parameters(args): Parameters<ProjectArgs>,
-        Extension(parts): Extension<Parts>,
+        Extension(resolved): Extension<ResolvedCaller>,
     ) -> Result<CallToolResult, McpError> {
-        let (caller, info) = caller(&self.state, &parts).await?;
-        audit_call(
-            &self.state,
-            &info,
-            "list_documents",
-            Some(args.project.clone()),
-            args.branch.clone(),
-        );
+        let caller = resolved.caller;
         let sc = scope(&self.state, &args.project, args.branch.as_deref(), caller).await?;
         let snap = load_snapshot(&self.state, &sc).await?;
         let visible = visible_ids(&self.state, &sc, &snap).await?;
@@ -804,16 +906,9 @@ impl DocsServer {
     async fn get_document_outline(
         &self,
         Parameters(args): Parameters<ReadDocArgs>,
-        Extension(parts): Extension<Parts>,
+        Extension(resolved): Extension<ResolvedCaller>,
     ) -> Result<CallToolResult, McpError> {
-        let (caller, info) = caller(&self.state, &parts).await?;
-        audit_call(
-            &self.state,
-            &info,
-            "get_document_outline",
-            Some(args.project.clone()),
-            args.path.clone(),
-        );
+        let caller = resolved.caller;
         if args.path.is_none() && args.doc_id.is_none() {
             return Err(McpError::invalid_params(
                 "provide either `path` or `doc_id`",
@@ -872,16 +967,9 @@ impl DocsServer {
     async fn read_document(
         &self,
         Parameters(args): Parameters<ReadDocArgs>,
-        Extension(parts): Extension<Parts>,
+        Extension(resolved): Extension<ResolvedCaller>,
     ) -> Result<CallToolResult, McpError> {
-        let (caller, info) = caller(&self.state, &parts).await?;
-        audit_call(
-            &self.state,
-            &info,
-            "read_document",
-            Some(args.project.clone()),
-            args.path.clone().or_else(|| args.section.clone()),
-        );
+        let caller = resolved.caller;
         if args.path.is_none() && args.doc_id.is_none() {
             return Err(McpError::invalid_params(
                 "provide either `path` or `doc_id`",
@@ -985,9 +1073,9 @@ impl DocsServer {
     async fn search_documents(
         &self,
         Parameters(args): Parameters<SearchArgs>,
-        Extension(parts): Extension<Parts>,
+        Extension(resolved): Extension<ResolvedCaller>,
     ) -> Result<CallToolResult, McpError> {
-        let (caller, info) = caller(&self.state, &parts).await?;
+        let caller = resolved.caller;
         let q = args.query.trim();
         if q.is_empty() {
             return Err(McpError::invalid_params("query must not be empty", None));
@@ -1002,13 +1090,6 @@ impl DocsServer {
                 ))
             }
         };
-        audit_call(
-            &self.state,
-            &info,
-            "search_documents",
-            Some(targets.join(",")),
-            Some(q.to_string()),
-        );
         let limit = args.limit.unwrap_or(10).clamp(1, 50);
         let offset = args.offset.unwrap_or(0).min(2000);
 
@@ -1094,16 +1175,9 @@ impl DocsServer {
     async fn get_link_graph(
         &self,
         Parameters(args): Parameters<ProjectArgs>,
-        Extension(parts): Extension<Parts>,
+        Extension(resolved): Extension<ResolvedCaller>,
     ) -> Result<CallToolResult, McpError> {
-        let (caller, info) = caller(&self.state, &parts).await?;
-        audit_call(
-            &self.state,
-            &info,
-            "get_link_graph",
-            Some(args.project.clone()),
-            args.branch.clone(),
-        );
+        let caller = resolved.caller;
         let sc = scope(&self.state, &args.project, args.branch.as_deref(), caller).await?;
         let snap = load_snapshot(&self.state, &sc).await?;
         let visible = visible_ids(&self.state, &sc, &snap).await?;
@@ -1177,6 +1251,50 @@ impl DocsServer {
     instructions = "Read-only access to Markdown documentation. Start with `list_projects`, then `list_documents` to see the index, `search_documents` to find relevant material, `get_document_outline` + `read_document(section=...)` to read only the relevant part, and `get_link_graph` to explore how documents reference each other. Search hits and documents carry `url` + `anchor`; cite them in answers. Without credentials only public projects and published documents are visible; send an API token (Settings → API token) as `Authorization: Bearer <token>` to also reach the projects you are a member of, including their unpublished documents."
 )]
 impl rmcp::ServerHandler for DocsServer {
+    /// 统一入口：先鉴权并把结果放进请求扩展，再交给工具路由；无论成功失败都留审计。
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        mut context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, McpError> {
+        let tool = request.name.to_string();
+        let project = audit_project(&request.arguments);
+        let detail = audit_detail(&request.arguments);
+
+        let resolved = {
+            let Some(parts) = context.extensions.get::<Parts>() else {
+                return Err(McpError::internal_error("missing request context", None));
+            };
+            match caller(&self.state, parts).await {
+                Ok((caller, info)) => ResolvedCaller { caller, info },
+                Err(e) => {
+                    let audit = ToolAudit::new(
+                        &self.state,
+                        CallerInfo {
+                            user_id: None,
+                            token_prefix: None,
+                            client_ip: client_ip(parts),
+                        },
+                        tool,
+                        project,
+                        detail,
+                    );
+                    audit.finish::<CallToolResponse>(&Err(e.clone()));
+                    return Err(e);
+                }
+            }
+        };
+
+        context.extensions.insert(resolved.clone());
+        let audit = ToolAudit::new(&self.state, resolved.info.clone(), tool, project, detail);
+        let out = self
+            .tool_router
+            .call(ToolCallContext::new(self, request, context))
+            .await;
+        audit.finish(&out);
+        out
+    }
+
     async fn list_resources(
         &self,
         _request: Option<PaginatedRequestParams>,
@@ -1255,8 +1373,8 @@ impl rmcp::ServerHandler for DocsServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, McpError> {
-        Ok(
-            ListResourceTemplatesResult::with_all_items(vec![ResourceTemplate::new(
+        Ok(ListResourceTemplatesResult::with_all_items(
+            vec![ResourceTemplate::new(
                 "mdocs://{project}/{path}",
                 "document",
             )
@@ -1264,8 +1382,8 @@ impl rmcp::ServerHandler for DocsServer {
             .with_description(
                 "Read a document by project slug and path, e.g. mdocs://handbook/guide/install.md",
             )
-            .with_mime_type("text/markdown")]),
-        )
+            .with_mime_type("text/markdown")],
+        ))
     }
 
     async fn read_resource(
