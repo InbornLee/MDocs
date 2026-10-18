@@ -5,6 +5,7 @@ members = ["crates/app", "crates/migration"]
 [workspace.package]
 version = "0.1.1"
 edition = "2021"
+license = "MIT"
 
 [profile.release]
 opt-level = 3

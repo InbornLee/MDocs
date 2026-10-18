@@ -333,6 +333,10 @@ mdocs-main/
 
 详见 [docs/AI-KNOWLEDGE-BASE.md](docs/AI-KNOWLEDGE-BASE.md)。
 
+## License
+
+[MIT](LICENSE) © 2026 Inborn Lee (李颖博)
+
 <br>
 
 <p align="center"><sub>MDocs · 单二进制、AI 原生的 Markdown 知识库</sub></p>
