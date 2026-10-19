@@ -8,6 +8,7 @@ mod m20261012_000001_ai_kb_p0;
 mod m20261018_000001_search_index;
 mod m20261018_000002_chunk_vectors;
 mod m20261018_000003_doc_meta;
+mod m20261019_000001_widen_text_fields;
 
 pub struct Migrator;
 
@@ -23,6 +24,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261018_000001_search_index::Migration),
             Box::new(m20261018_000002_chunk_vectors::Migration),
             Box::new(m20261018_000003_doc_meta::Migration),
+            Box::new(m20261019_000001_widen_text_fields::Migration),
         ]
     }
 }

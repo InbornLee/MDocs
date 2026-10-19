@@ -111,6 +111,18 @@ pub struct PathResolver {
     by_base: HashMap<String, Vec<Uuid>>,
 }
 
+fn cap(s: String, max: usize) -> String {
+    if s.chars().count() <= max {
+        s
+    } else {
+        s.chars().take(max).collect()
+    }
+}
+
+fn cap_opt(s: Option<String>, max: usize) -> Option<String> {
+    s.map(|s| cap(s, max))
+}
+
 /// Normalize a `/`-joined relative path (resolve `.` and `..` segments).
 pub(crate) fn clean_path(dir: &str, rel: &str) -> Option<String> {
     let rel = rel.trim().trim_start_matches("./");
@@ -266,10 +278,10 @@ pub async fn after_commit(
                 branch_id: Set(branch_id),
                 source_doc_id: Set(u.doc_id),
                 target_doc_id: Set(target),
-                raw_target: Set(raw.raw_target),
+                raw_target: Set(cap(raw.raw_target, 2048)),
                 link_type: Set(raw.link_type.to_string()),
-                anchor: Set(raw.anchor),
-                display_text: Set(raw.display_text),
+                anchor: Set(cap_opt(raw.anchor, 1024)),
+                display_text: Set(cap_opt(raw.display_text, 1024)),
                 line_no: Set(Some(raw.line_no)),
             }
             .insert(db)

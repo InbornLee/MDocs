@@ -30,7 +30,7 @@ pub fn sha256_hex(content: &str) -> String {
 /// name without extension.
 pub fn extract_title(content: &str, path: &str) -> String {
     if let Some(title) = front_matter_title(content) {
-        return title;
+        return title.chars().take(200).collect();
     }
     for line in content.lines().take(50) {
         if let Some(h) = line.trim().strip_prefix("# ") {
@@ -43,7 +43,9 @@ pub fn extract_title(content: &str, path: &str) -> String {
     let name = path.rsplit('/').next().unwrap_or(path);
     name.trim_end_matches(".md")
         .trim_end_matches(".markdown")
-        .to_string()
+        .chars()
+        .take(200)
+        .collect()
 }
 
 /// `title:` inside a leading `---` … `---` block. Only a block that opens on the
